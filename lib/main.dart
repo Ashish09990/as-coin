@@ -1,12 +1,11 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 
 void main() {
-  runApp(const AsCoinApp());
+  runApp(const ASCoinApp());
 }
 
-class AsCoinApp extends StatelessWidget {
-  const AsCoinApp({super.key});
+class ASCoinApp extends StatelessWidget {
+  const ASCoinApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -16,147 +15,259 @@ class AsCoinApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.indigo,
+        brightness: Brightness.dark,
       ),
-      home: const MiningPage(),
+      home: const LoginPage(),
     );
   }
 }
 
-class MiningPage extends StatefulWidget {
-  const MiningPage({super.key});
+/* =========================
+   LOGIN
+========================= */
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
 
   @override
-  State<MiningPage> createState() => _MiningPageState();
+  State<LoginPage> createState() => _LoginPageState();
 }
 
-class _MiningPageState extends State<MiningPage> {
-  static const int totalMiningDays = 365;
-  static const double yearlyMaximum = 50.0;
-  static const double maxSupply = 20000000.0;
+class _LoginPageState extends State<LoginPage> {
+  final country = TextEditingController(text: '+91');
+  final phone = TextEditingController();
 
-  int miningDays = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.monetization_on,
+                size: 90,
+              ),
+              const SizedBox(height: 15),
+              const Text(
+                'AS COIN',
+                style: TextStyle(
+                  fontSize: 34,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Text(
+                'ASC • Digital Reward Network',
+                style: TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 45),
+
+              Row(
+                children: [
+                  SizedBox(
+                    width: 90,
+                    child: TextField(
+                      controller: country,
+                      keyboardType: TextInputType.phone,
+                      decoration: const InputDecoration(
+                        labelText: 'Code',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: phone,
+                      keyboardType: TextInputType.phone,
+                      decoration: const InputDecoration(
+                        labelText: 'Mobile number',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () {
+                    if (phone.text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Mobile number enter karo'),
+                        ),
+                      );
+                      return;
+                    }
+
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const HomePage(),
+                      ),
+                    );
+                  },
+                  child: const Padding(
+                    padding: EdgeInsets.all(15),
+                    child: Text('CONTINUE'),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 15),
+
+              const Text(
+                'Production version mein OTP server verification required hai.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/* =========================
+   HOME
+========================= */
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
   double balance = 0.0;
-
   bool mining = false;
-  bool kycVerified = false;
-  bool coinsLocked = true;
+  bool kyc = false;
 
-  Timer? timer;
-
-  double get dailyReward => yearlyMaximum / totalMiningDays;
+  static const double dailyRate = 0.14;
 
   void startMining() {
-    if (!kycVerified) {
-      showMessage('KYC verification required.');
-      return;
-    }
-
-    if (miningDays >= totalMiningDays) {
-      showMessage('Your 365-day mining period is complete.');
-      return;
-    }
-
-    timer?.cancel();
-
     setState(() {
       mining = true;
     });
 
-    // DEMO ONLY:
-    // 1 second represents 1 mining day.
-    timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
-
-      setState(() {
-        miningDays++;
-
-        balance = dailyReward * miningDays;
-
-        if (miningDays >= totalMiningDays) {
-          miningDays = totalMiningDays;
-          balance = yearlyMaximum;
-          mining = false;
-          timer.cancel();
-
-          showMessage('Mining completed. You earned 50 ASC.');
-        }
-      });
-    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Mining started • Maximum 0.14 ASC/day'),
+      ),
+    );
   }
 
-  void stopMining() {
-    timer?.cancel();
+  void claimReward() {
+    if (!mining) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Pehle mining start karo'),
+        ),
+      );
+      return;
+    }
 
     setState(() {
-      mining = false;
+      balance += dailyRate;
     });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('0.14 ASC reward credited'),
+      ),
+    );
   }
 
-  void showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+  void openKyc() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => KycPage(
+          onVerified: () {
+            setState(() {
+              kyc = true;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  void openWallet() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => WalletPage(
+          balance: balance,
+          kyc: kyc,
+        ),
+      ),
     );
   }
 
   @override
-  void dispose() {
-    timer?.cancel();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final progress = miningDays / totalMiningDays;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('AS COIN • ASC'),
+        actions: [
+          IconButton(
+            onPressed: openWallet,
+            icon: const Icon(Icons.account_balance_wallet),
+          ),
+        ],
       ),
 
       body: ListView(
-        padding: const EdgeInsets.all(18),
-
+        padding: const EdgeInsets.all(16),
         children: [
+
+          /* BALANCE */
 
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(20),
-
+              padding: const EdgeInsets.all(22),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-
                 children: [
-
-                  Text(
+                  const Text(
                     'AS COIN',
-                    style: Theme.of(context)
-                        .textTheme
-                        .headlineMedium,
+                    style: TextStyle(
+                      fontSize: 27,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
 
                   const Text(
-                    'ASC • Testnet',
+                    'ASC • Network',
+                    style: TextStyle(color: Colors.grey),
                   ),
 
                   const SizedBox(height: 20),
 
                   Text(
-                    '${balance.toStringAsFixed(6)} ASC',
-                    style: Theme.of(context)
-                        .textTheme
-                        .displaySmall,
+                    '${balance.toStringAsFixed(8)} ASC',
+                    style: const TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 8),
 
-                  Text(
-                    'Mining: $miningDays / 365 days',
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  LinearProgressIndicator(
-                    value: progress,
+                  const Text(
+                    'Maximum mining rate: 0.14 ASC / day',
                   ),
                 ],
               ),
@@ -165,126 +276,57 @@ class _MiningPageState extends State<MiningPage> {
 
           const SizedBox(height: 12),
 
-          Card(
-            child: Column(
-              children: [
-
-                SwitchListTile(
-                  title: const Text(
-                    'KYC Verification',
-                  ),
-
-                  subtitle: const Text(
-                    'Demo verification status',
-                  ),
-
-                  value: kycVerified,
-
-                  onChanged: (value) {
-
-                    setState(() {
-                      kycVerified = value;
-                    });
-
-                  },
-                ),
-
-                ListTile(
-                  leading: Icon(
-                    coinsLocked
-                        ? Icons.lock
-                        : Icons.lock_open,
-                  ),
-
-                  title: const Text(
-                    'Coin Lock',
-                  ),
-
-                  subtitle: Text(
-                    coinsLocked
-                        ? 'Coins locked before launch'
-                        : 'Coins unlocked',
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 12),
-
-          SizedBox(
-            height: 52,
-
-            child: FilledButton.icon(
-
-              onPressed:
-                  miningDays >= totalMiningDays
-                      ? null
-                      : mining
-                          ? stopMining
-                          : startMining,
-
-              icon: Icon(
-                mining
-                    ? Icons.pause
-                    : Icons.bolt,
-              ),
-
-              label: Text(
-                mining
-                    ? 'STOP MINING'
-                    : miningDays >= totalMiningDays
-                        ? 'MINING COMPLETE'
-                        : 'START MINING',
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 12),
+          /* MINING */
 
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
-
+              padding: const EdgeInsets.all(18),
               child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-
                 children: [
-
-                  Text(
-                    'AS COIN PROTOCOL',
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleLarge,
+                  Row(
+                    children: [
+                      const Icon(Icons.bolt),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'Mining',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        mining ? 'ACTIVE' : 'STOPPED',
+                      ),
+                    ],
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 15),
 
-                  Text(
-                    'Maximum Supply: '
-                    '${maxSupply.toStringAsFixed(0)} ASC',
+                  LinearProgressIndicator(
+                    value: mining ? 0.5 : 0,
                   ),
 
-                  const Text(
-                    'First Year Maximum: 50 ASC / User',
+                  const SizedBox(height: 15),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: startMining,
+                      child: Text(
+                        mining ? 'MINING ACTIVE' : 'START MINING',
+                      ),
+                    ),
                   ),
 
-                  Text(
-                    'Daily Mining Rate: '
-                    '${dailyReward.toStringAsFixed(15)} ASC',
-                  ),
+                  const SizedBox(height: 8),
 
-                  const Text(
-                    'Mining Period: 365 Days',
-                  ),
-
-                  const Text(
-                    'Quarterly Reward Cycle: 90 Days',
-                  ),
-
-                  const Text(
-                    'Launch Lock: Enabled',
+                  OutlinedButton(
+                    onPressed: claimReward,
+                    child: const Text(
+                      'SYNC / CLAIM DAILY REWARD',
+                    ),
                   ),
                 ],
               ),
@@ -293,27 +335,292 @@ class _MiningPageState extends State<MiningPage> {
 
           const SizedBox(height: 12),
 
-          OutlinedButton.icon(
+          /* KYC */
 
-            onPressed: () {
-
-              showMessage(
-                coinsLocked
-                    ? 'Wallet transfers are locked until launch.'
-                    : 'Wallet transfer enabled.',
-              );
-
-            },
-
-            icon: const Icon(
-              Icons.account_balance_wallet,
+          Card(
+            child: ListTile(
+              leading: Icon(
+                kyc
+                    ? Icons.verified
+                    : Icons.verified_user_outlined,
+              ),
+              title: const Text(
+                'KYC Verification',
+              ),
+              subtitle: Text(
+                kyc
+                    ? 'KYC verified'
+                    : 'KYC available immediately • Fee 1 USDT',
+              ),
+              trailing: FilledButton(
+                onPressed: kyc ? null : openKyc,
+                child: Text(
+                  kyc ? 'VERIFIED' : 'KYC',
+                ),
+              ),
             ),
+          ),
 
-            label: const Text(
-              'WALLET',
+          const SizedBox(height: 12),
+
+          /* PROTOCOL */
+
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text(
+                    'AS COIN PROTOCOL',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 15),
+                  Text('Daily Maximum: 0.14 ASC'),
+                  Text('Mining End: 2130'),
+                  Text('KYC: Immediate'),
+                  Text('Normal KYC Fee: 1 USDT'),
+                  Text('Migration: 365 days'),
+                  Text('User Transfers: Available after verification'),
+                ],
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/* =========================
+   KYC
+========================= */
+
+class KycPage extends StatefulWidget {
+  final VoidCallback onVerified;
+
+  const KycPage({
+    super.key,
+    required this.onVerified,
+  });
+
+  @override
+  State<KycPage> createState() => _KycPageState();
+}
+
+class _KycPageState extends State<KycPage> {
+  final code = TextEditingController();
+
+  // IMPORTANT:
+  // Production mein secret ko app ke andar hard-code mat karna.
+  static const ownerCode = 'Ashish@09bs';
+
+  bool processing = false;
+
+  void submit() async {
+    setState(() {
+      processing = true;
+    });
+
+    await Future.delayed(const Duration(seconds: 1));
+
+    if (code.text == ownerCode) {
+      widget.onVerified();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Owner KYC authorization accepted'),
+          ),
+        );
+        Navigator.pop(context);
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Production KYC mein 1 USDT payment blockchain se verify hogi.',
+            ),
+          ),
+        );
+      }
+    }
+
+    setState(() {
+      processing = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('KYC Verification'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            const Icon(
+              Icons.verified_user,
+              size: 70,
+            ),
+
+            const SizedBox(height: 20),
+
+            const Text(
+              'KYC available immediately',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 10),
+
+            const Text(
+              'Normal users: 1 USDT • TRC20',
+              textAlign: TextAlign.center,
+            ),
+
+            const SizedBox(height: 30),
+
+            TextField(
+              controller: code,
+              decoration: const InputDecoration(
+                labelText: 'Special authorization code',
+                border: OutlineInputBorder(),
+              ),
+            ),
+
+            const SizedBox(height: 15),
+
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: processing ? null : submit,
+                child: Text(
+                  processing ? 'VERIFYING...' : 'VERIFY KYC',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/* =========================
+   WALLET
+========================= */
+
+class WalletPage extends StatelessWidget {
+  final double balance;
+  final bool kyc;
+
+  const WalletPage({
+    super.key,
+    required this.balance,
+    required this.kyc,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('ASC WALLET'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(25),
+                child: Column(
+                  children: [
+                    const Icon(
+                      Icons.account_balance_wallet,
+                      size: 55,
+                    ),
+                    const SizedBox(height: 15),
+                    const Text(
+                      'Wallet Balance',
+                      style: TextStyle(fontSize: 18),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${balance.toStringAsFixed(8)} ASC',
+                      style: const TextStyle(
+                        fontSize: 30,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 15),
+
+            ListTile(
+              leading: const Icon(Icons.verified),
+              title: const Text('KYC Status'),
+              subtitle: Text(
+                kyc ? 'Verified' : 'Not verified',
+              ),
+            ),
+
+            const Divider(),
+
+            ListTile(
+              leading: const Icon(Icons.send),
+              title: const Text('Send ASC'),
+              subtitle: const Text(
+                'Available for verified accounts',
+              ),
+              onTap: () {
+                if (!kyc) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'KYC verification required',
+                      ),
+                    ),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Production wallet transfer requires backend',
+                      ),
+                    ),
+                  );
+                }
+              },
+            ),
+
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('Transaction History'),
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Transaction ledger will be server controlled',
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
