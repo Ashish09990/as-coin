@@ -23,7 +23,7 @@ class Config {
   static const String symbol = 'ASC';
 
   // Leave empty until backend is deployed.
-  static const String backendUrl = '';
+  static const String backendUrl = 'https://as-coin.onrender.com';
 
   static const String network = 'TRC20 (TRON)';
 
