@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,75 +15,94 @@ void main() {
 }
 
 // ============================================================
-// AS COIN CONFIGURATION
+// CONFIG
 // ============================================================
 
-class ASConfig {
-  // IMPORTANT:
-  // Replace this with your deployed HTTPS backend URL.
-  // Example: https://api.example.com
-  static const String backendUrl = '';
-
+class Config {
   static const String appName = 'AS COIN';
   static const String symbol = 'ASC';
 
-  static const int maxSupply = 21000000;
+  // Leave empty until backend is deployed.
+  static const String backendUrl = '';
 
-  // Initial sale example:
-  // 50 USDT = 5,000 ASC
+  static const String network = 'TRC20 (TRON)';
+
   static const double packageUsdt = 50.0;
   static const double packageAsc = 5000.0;
 
-  static const double kycFeeUsdt = 1.0;
+  static const double kycFee = 1.0;
 
-  static const String usdtNetwork = 'TRC20 (TRON)';
+  static const int maxSupply = 21000000;
 
-  // IMPORTANT:
-  // Use only an address controlled by your production payment system.
-  static const String usdtDepositAddress =
-      'TYskeHD53kcs9ksb5ymBGubtJAJpQPkND2';
+  // This address will be supplied by backend in production.
+  static const String fallbackUsdtAddress = '';
 
-  static const int verificationSeconds = 300;
+  static bool get backendReady => backendUrl.trim().isNotEmpty;
 }
 
 // ============================================================
-// MODELS
+// SESSION
 // ============================================================
 
-class UserSession {
+class Session {
   final String token;
   final String userId;
-  final String? phone;
   final String? email;
-  final String? telegramId;
+  final String? phone;
   final double balance;
   final String kycStatus;
   final String? walletAddress;
 
-  UserSession({
+  const Session({
     required this.token,
     required this.userId,
-    this.phone,
     this.email,
-    this.telegramId,
+    this.phone,
     required this.balance,
     required this.kycStatus,
     this.walletAddress,
   });
 
-  factory UserSession.fromJson(Map<String, dynamic> j) {
-    return UserSession(
-      token: j['token']?.toString() ?? '',
-      userId: j['user_id']?.toString() ?? '',
-      phone: j['phone']?.toString(),
-      email: j['email']?.toString(),
-      telegramId: j['telegram_id']?.toString(),
-      balance: double.tryParse('${j['balance'] ?? 0}') ?? 0,
-      kycStatus: j['kyc_status']?.toString() ?? 'Pending',
-      walletAddress: j['wallet_address']?.toString(),
+  factory Session.fromJson(Map<String, dynamic> json) {
+    return Session(
+      token: json['token']?.toString() ?? '',
+      userId: json['user_id']?.toString() ?? '',
+      email: json['email']?.toString(),
+      phone: json['phone']?.toString(),
+      balance:
+          double.tryParse('${json['balance'] ?? 0}') ?? 0,
+      kycStatus:
+          json['kyc_status']?.toString() ?? 'Pending',
+      walletAddress:
+          json['wallet_address']?.toString(),
+    );
+  }
+
+  Session copyWith({
+    String? token,
+    String? userId,
+    String? email,
+    String? phone,
+    double? balance,
+    String? kycStatus,
+    String? walletAddress,
+  }) {
+    return Session(
+      token: token ?? this.token,
+      userId: userId ?? this.userId,
+      email: email ?? this.email,
+      phone: phone ?? this.phone,
+      balance: balance ?? this.balance,
+      kycStatus: kycStatus ?? this.kycStatus,
+      walletAddress:
+          walletAddress ?? this.walletAddress,
     );
   }
 }
+
+// ============================================================
+// PURCHASE
+// ============================================================
 
 class Purchase {
   final String id;
@@ -89,57 +110,73 @@ class Purchase {
   final double asc;
   final String status;
   final String? txHash;
-  final DateTime? createdAt;
+  final String? depositAddress;
 
-  Purchase({
+  const Purchase({
     required this.id,
     required this.usdt,
     required this.asc,
     required this.status,
     this.txHash,
-    this.createdAt,
+    this.depositAddress,
   });
 
-  factory Purchase.fromJson(Map<String, dynamic> j) {
+  factory Purchase.fromJson(Map<String, dynamic> json) {
     return Purchase(
-      id: j['id']?.toString() ?? '',
-      usdt: double.tryParse('${j['usdt'] ?? 0}') ?? 0,
-      asc: double.tryParse('${j['asc'] ?? 0}') ?? 0,
-      status: j['status']?.toString() ?? 'Pending',
-      txHash: j['tx_hash']?.toString(),
-      createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+      id: json['id']?.toString() ?? '',
+      usdt:
+          double.tryParse('${json['usdt'] ?? 0}') ?? 0,
+      asc:
+          double.tryParse('${json['asc'] ?? 0}') ?? 0,
+      status:
+          json['status']?.toString() ?? 'Pending',
+      txHash:
+          json['tx_hash']?.toString(),
+      depositAddress:
+          json['deposit_address']?.toString(),
     );
   }
 }
 
-class ASCTx {
+// ============================================================
+// TRANSACTION
+// ============================================================
+
+class WalletTransaction {
   final String id;
   final String type;
   final double amount;
   final String address;
   final String status;
   final String? txHash;
-  final DateTime? createdAt;
+  final String? date;
 
-  ASCTx({
+  const WalletTransaction({
     required this.id,
     required this.type,
     required this.amount,
     required this.address,
     required this.status,
     this.txHash,
-    this.createdAt,
+    this.date,
   });
 
-  factory ASCTx.fromJson(Map<String, dynamic> j) {
-    return ASCTx(
-      id: j['id']?.toString() ?? '',
-      type: j['type']?.toString() ?? 'Transaction',
-      amount: double.tryParse('${j['amount'] ?? 0}') ?? 0,
-      address: j['address']?.toString() ?? '',
-      status: j['status']?.toString() ?? 'Pending',
-      txHash: j['tx_hash']?.toString(),
-      createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+  factory WalletTransaction.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    return WalletTransaction(
+      id: json['id']?.toString() ?? '',
+      type: json['type']?.toString() ?? 'Transaction',
+      amount:
+          double.tryParse('${json['amount'] ?? 0}') ?? 0,
+      address:
+          json['address']?.toString() ?? '',
+      status:
+          json['status']?.toString() ?? 'Pending',
+      txHash:
+          json['tx_hash']?.toString(),
+      date:
+          json['created_at']?.toString(),
     );
   }
 }
@@ -148,28 +185,28 @@ class ASCTx {
 // API
 // ============================================================
 
-class APIException implements Exception {
+class ApiException implements Exception {
   final String message;
 
-  APIException(this.message);
+  ApiException(this.message);
 
   @override
   String toString() => message;
 }
 
-class ASApi {
-  static String get base => ASConfig.backendUrl.trim();
+class Api {
+  static String get base => Config.backendUrl.trim();
 
-  static bool get configured => base.isNotEmpty;
-
-  static Future<Map<String, dynamic>> _request(
+  static Future<Map<String, dynamic>> request(
     String method,
     String path, {
     String? token,
     Map<String, dynamic>? body,
   }) async {
-    if (!configured) {
-      throw APIException('Backend connection is not configured.');
+    if (base.isEmpty) {
+      throw ApiException(
+        'Backend connection is not configured.',
+      );
     }
 
     final uri = Uri.parse('$base$path');
@@ -187,7 +224,10 @@ class ASApi {
 
     try {
       if (method == 'GET') {
-        response = await http.get(uri, headers: headers);
+        response = await http.get(
+          uri,
+          headers: headers,
+        );
       } else {
         response = await http.post(
           uri,
@@ -196,8 +236,8 @@ class ASApi {
         );
       }
     } catch (_) {
-      throw APIException(
-        'Unable to connect to the AS COIN server. Please try again.',
+      throw ApiException(
+        'Unable to connect to AS COIN server.',
       );
     }
 
@@ -205,15 +245,17 @@ class ASApi {
 
     try {
       final decoded = jsonDecode(response.body);
+
       if (decoded is Map<String, dynamic>) {
         data = decoded;
       }
     } catch (_) {}
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw APIException(
-        data['message']?.toString() ??
-            data['detail']?.toString() ??
+    if (response.statusCode < 200 ||
+        response.statusCode >= 300) {
+      throw ApiException(
+        data['detail']?.toString() ??
+            data['message']?.toString() ??
             'Server request failed.',
       );
     }
@@ -221,24 +263,26 @@ class ASApi {
     return data;
   }
 
-  // ---------------- AUTH ----------------
-
-  static Future<String> requestPhoneOtp(String phone) async {
-    final data = await _request(
+  static Future<String> requestOtp(
+    String phone,
+  ) async {
+    final data = await request(
       'POST',
       '/auth/request-otp',
-      body: {'phone': phone},
+      body: {
+        'phone': phone,
+      },
     );
 
     return data['message']?.toString() ??
-        'Verification code sent successfully.';
+        'Verification code sent.';
   }
 
-  static Future<UserSession> verifyPhoneOtp(
+  static Future<Session> verifyOtp(
     String phone,
     String otp,
   ) async {
-    final data = await _request(
+    final data = await request(
       'POST',
       '/auth/verify-otp',
       body: {
@@ -247,11 +291,13 @@ class ASApi {
       },
     );
 
-    return UserSession.fromJson(data);
+    return Session.fromJson(data);
   }
 
-  static Future<UserSession> googleLogin(String idToken) async {
-    final data = await _request(
+  static Future<Session> googleLogin(
+    String idToken,
+  ) async {
+    final data = await request(
       'POST',
       '/auth/google',
       body: {
@@ -259,82 +305,46 @@ class ASApi {
       },
     );
 
-    return UserSession.fromJson(data);
+    return Session.fromJson(data);
   }
 
-  static Future<UserSession> telegramLogin(String telegramData) async {
-    final data = await _request(
-      'POST',
-      '/auth/telegram',
-      body: {
-        'telegram_data': telegramData,
-      },
-    );
-
-    return UserSession.fromJson(data);
-  }
-
-  // ---------------- USER ----------------
-
-  static Future<UserSession> me(String token) async {
-    final data = await _request(
+  static Future<Session> me(
+    String token,
+  ) async {
+    final data = await request(
       'GET',
       '/me',
       token: token,
     );
 
-    return UserSession(
+    return Session(
       token: token,
-      userId: data['user_id']?.toString() ?? '',
-      phone: data['phone']?.toString(),
-      email: data['email']?.toString(),
-      telegramId: data['telegram_id']?.toString(),
-      balance: double.tryParse('${data['balance'] ?? 0}') ?? 0,
-      kycStatus: data['kyc_status']?.toString() ?? 'Pending',
-      walletAddress: data['wallet_address']?.toString(),
+      userId:
+          data['user_id']?.toString() ?? '',
+      email:
+          data['email']?.toString(),
+      phone:
+          data['phone']?.toString(),
+      balance:
+          double.tryParse(
+                '${data['balance'] ?? 0}',
+              ) ??
+              0,
+      kycStatus:
+          data['kyc_status']?.toString() ??
+              'Pending',
+      walletAddress:
+          data['wallet_address']?.toString(),
     );
   }
-
-  // ---------------- KYC ----------------
-
-  static Future<Map<String, dynamic>> createKycPayment(
-    String token,
-  ) async {
-    return _request(
-      'POST',
-      '/kyc/payment',
-      token: token,
-      body: {
-        'amount_usdt': ASConfig.kycFeeUsdt,
-        'network': ASConfig.usdtNetwork,
-      },
-    );
-  }
-
-  static Future<Map<String, dynamic>> kycStatus(
-    String token,
-  ) async {
-    return _request(
-      'GET',
-      '/kyc/status',
-      token: token,
-    );
-  }
-
-  // ---------------- PURCHASE ----------------
 
   static Future<Purchase> createPurchase(
     String token,
   ) async {
-    final data = await _request(
+    final data = await request(
       'POST',
       '/purchases/create',
       token: token,
-      body: {
-        'amount_usdt': ASConfig.packageUsdt,
-        'amount_asc': ASConfig.packageAsc,
-        'network': ASConfig.usdtNetwork,
-      },
     );
 
     return Purchase.fromJson(data);
@@ -342,23 +352,41 @@ class ASApi {
 
   static Future<Purchase> purchaseStatus(
     String token,
-    String purchaseId,
+    String id,
   ) async {
-    final data = await _request(
+    final data = await request(
       'GET',
-      '/purchases/$purchaseId',
+      '/purchases/$id',
       token: token,
     );
 
     return Purchase.fromJson(data);
   }
 
-  // ---------------- WALLET ----------------
-
-  static Future<List<ASCTx>> transactions(
+  static Future<Map<String, dynamic>> kycPayment(
     String token,
   ) async {
-    final data = await _request(
+    return request(
+      'POST',
+      '/kyc/payment',
+      token: token,
+    );
+  }
+
+  static Future<Map<String, dynamic>> kycStatus(
+    String token,
+  ) async {
+    return request(
+      'GET',
+      '/kyc/status',
+      token: token,
+    );
+  }
+
+  static Future<List<WalletTransaction>> history(
+    String token,
+  ) async {
+    final data = await request(
       'GET',
       '/transactions',
       token: token,
@@ -372,16 +400,18 @@ class ASApi {
 
     return list
         .whereType<Map<String, dynamic>>()
-        .map(ASCTx.fromJson)
+        .map(
+          WalletTransaction.fromJson,
+        )
         .toList();
   }
 
-  static Future<Map<String, dynamic>> sendAsc(
+  static Future<Map<String, dynamic>> send(
     String token,
     String address,
     double amount,
   ) async {
-    return _request(
+    return request(
       'POST',
       '/wallet/send',
       token: token,
@@ -394,25 +424,36 @@ class ASApi {
 }
 
 // ============================================================
-// LOCAL SESSION
+// LOCAL TOKEN STORAGE
 // ============================================================
 
-class SessionStore {
-  static const String key = 'asc_token';
+class TokenStore {
+  static const String key = 'as_coin_token';
 
-  static Future<void> save(String token) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(key, token);
+  static Future<void> save(
+    String token,
+  ) async {
+    final prefs =
+        await SharedPreferences.getInstance();
+
+    await prefs.setString(
+      key,
+      token,
+    );
   }
 
-  static Future<String?> read() async {
-    final p = await SharedPreferences.getInstance();
-    return p.getString(key);
+  static Future<String?> get() async {
+    final prefs =
+        await SharedPreferences.getInstance();
+
+    return prefs.getString(key);
   }
 
   static Future<void> clear() async {
-    final p = await SharedPreferences.getInstance();
-    await p.remove(key);
+    final prefs =
+        await SharedPreferences.getInstance();
+
+    await prefs.remove(key);
   }
 }
 
@@ -426,16 +467,19 @@ class ASCoinApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: ASConfig.appName,
+      title: Config.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF101116),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFB9BEFF),
+        useMaterial3: true,
+        scaffoldBackgroundColor:
+            const Color(0xFF101116),
+        colorScheme:
+            ColorScheme.fromSeed(
+          seedColor:
+              const Color(0xFFB7BEFF),
           brightness: Brightness.dark,
         ),
-        useMaterial3: true,
       ),
       home: const StartupPage(),
     );
@@ -450,56 +494,65 @@ class StartupPage extends StatefulWidget {
   const StartupPage({super.key});
 
   @override
-  State<StartupPage> createState() => _StartupPageState();
+  State<StartupPage> createState() =>
+      _StartupPageState();
 }
 
-class _StartupPageState extends State<StartupPage> {
+class _StartupPageState
+    extends State<StartupPage> {
   @override
   void initState() {
     super.initState();
-    _load();
+    start();
   }
 
-  Future<void> _load() async {
-    await Future.delayed(const Duration(milliseconds: 700));
+  Future<void> start() async {
+    await Future.delayed(
+      const Duration(milliseconds: 700),
+    );
 
-    final token = await SessionStore.read();
+    final token =
+        await TokenStore.get();
 
     if (!mounted) return;
 
-    if (token == null || token.isEmpty || !ASApi.configured) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const LoginPage(),
-        ),
-      );
+    if (token == null ||
+        token.isEmpty ||
+        !Config.backendReady) {
+      goLogin();
       return;
     }
 
     try {
-      final session = await ASApi.me(token);
+      final session =
+          await Api.me(token);
 
       if (!mounted) return;
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => HomePage(session: session),
+          builder: (_) =>
+              HomePage(session: session),
         ),
       );
     } catch (_) {
-      await SessionStore.clear();
+      await TokenStore.clear();
 
       if (!mounted) return;
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const LoginPage(),
-        ),
-      );
+      goLogin();
     }
+  }
+
+  void goLogin() {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            const LoginPage(),
+      ),
+    );
   }
 
   @override
@@ -507,24 +560,31 @@ class _StartupPageState extends State<StartupPage> {
     return const Scaffold(
       body: Center(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize:
+              MainAxisSize.min,
           children: [
-            Icon(
-              Icons.account_balance_wallet,
-              size: 72,
+            CircleAvatar(
+              radius: 55,
+              backgroundColor:
+                  Colors.white,
+              child: Icon(
+                Icons.attach_money,
+                size: 65,
+                color: Colors.black,
+              ),
             ),
-            SizedBox(height: 18),
+            SizedBox(height: 20),
             Text(
               'AS COIN',
               style: TextStyle(
                 fontSize: 30,
-                fontWeight: FontWeight.bold,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
             SizedBox(height: 8),
             Text(
               'Secure ASC Network',
-              style: TextStyle(fontSize: 16),
             ),
             SizedBox(height: 25),
             CircularProgressIndicator(),
@@ -543,51 +603,72 @@ class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
 
   @override
-  State<LoginPage> createState() => _LoginPageState();
+  State<LoginPage> createState() =>
+      _LoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> {
-  final phoneController = TextEditingController();
-  final otpController = TextEditingController();
+class _LoginPageState
+    extends State<LoginPage> {
+  final phone =
+      TextEditingController();
+
+  final otp =
+      TextEditingController();
 
   String countryCode = '+91';
+
   bool otpSent = false;
   bool loading = false;
+  bool googleLoading = false;
 
   @override
   void dispose() {
-    phoneController.dispose();
-    otpController.dispose();
+    phone.dispose();
+    otp.dispose();
     super.dispose();
   }
 
-  void message(String text) {
+  void showMessage(
+    String text,
+  ) {
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
+      SnackBar(
+        content: Text(text),
+      ),
     );
   }
 
   Future<void> sendOtp() async {
-    if (!ASApi.configured) {
-      message('Backend connection is not configured.');
+    if (!Config.backendReady) {
+      showMessage(
+        'Backend connection is not configured.',
+      );
       return;
     }
 
-    final number = phoneController.text.trim();
+    final number =
+        phone.text.trim();
 
     if (number.length < 6) {
-      message('Enter a valid mobile number.');
+      showMessage(
+        'Enter a valid mobile number.',
+      );
       return;
     }
 
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+    });
 
     try {
-      final fullPhone = '$countryCode$number';
-
-      final result = await ASApi.requestPhoneOtp(fullPhone);
+      final message =
+          await Api.requestOtp(
+        '$countryCode$number',
+      );
 
       if (!mounted) return;
 
@@ -596,220 +677,418 @@ class _LoginPageState extends State<LoginPage> {
         loading = false;
       });
 
-      message(result);
+      showMessage(message);
     } catch (e) {
-      setState(() => loading = false);
-      message(e.toString().replaceFirst('Exception: ', ''));
+      setState(() {
+        loading = false;
+      });
+
+      showMessage(
+        cleanError(e),
+      );
     }
   }
 
   Future<void> verifyOtp() async {
-    final number = phoneController.text.trim();
-    final otp = otpController.text.trim();
+    final number =
+        phone.text.trim();
 
-    if (otp.length < 4) {
-      message('Enter the verification code.');
+    final code =
+        otp.text.trim();
+
+    if (code.length < 4) {
+      showMessage(
+        'Enter the verification code.',
+      );
       return;
     }
 
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+    });
 
     try {
-      final session = await ASApi.verifyPhoneOtp(
+      final session =
+          await Api.verifyOtp(
         '$countryCode$number',
-        otp,
+        code,
       );
 
-      await SessionStore.save(session.token);
+      await TokenStore.save(
+        session.token,
+      );
 
       if (!mounted) return;
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => HomePage(session: session),
+          builder: (_) =>
+              HomePage(
+            session: session,
+          ),
         ),
       );
     } catch (e) {
-      setState(() => loading = false);
-      message(e.toString().replaceFirst('Exception: ', ''));
+      setState(() {
+        loading = false;
+      });
+
+      showMessage(
+        cleanError(e),
+      );
     }
   }
 
-  Future<void> googleLogin() async {
-    message(
-      'Google Sign-In requires the production Google authentication configuration.',
-    );
+  Future<void> googleSignIn() async {
+    if (!Config.backendReady) {
+      showMessage(
+        'Backend connection is not configured.',
+      );
+      return;
+    }
+
+    setState(() {
+      googleLoading = true;
+    });
+
+    try {
+      final signIn =
+          GoogleSignIn.instance;
+
+      await signIn.initialize();
+
+      final account =
+          await signIn.authenticate();
+
+      final authentication =
+          account.authentication;
+
+      final idToken =
+          authentication.idToken;
+
+      if (idToken == null ||
+          idToken.isEmpty) {
+        throw ApiException(
+          'Google ID token was not received.',
+        );
+      }
+
+      final session =
+          await Api.googleLogin(
+        idToken,
+      );
+
+      await TokenStore.save(
+        session.token,
+      );
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              HomePage(
+            session: session,
+          ),
+        ),
+      );
+    } catch (e) {
+      showMessage(
+        cleanError(e),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          googleLoading = false;
+        });
+      }
+    }
   }
 
-  Future<void> telegramLogin() async {
-    message(
-      'Telegram verification requires the production Telegram Gateway configuration.',
-    );
+  String cleanError(
+    Object error,
+  ) {
+    return error
+        .toString()
+        .replaceFirst(
+          'Exception: ',
+          '',
+        );
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding:
+                const EdgeInsets.all(24),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 500),
+              constraints:
+                  const BoxConstraints(
+                maxWidth: 520,
+              ),
               child: Column(
                 children: [
-                  const SizedBox(height: 25),
+                  const SizedBox(
+                    height: 20,
+                  ),
 
                   const CircleAvatar(
-                    radius: 62,
-                    backgroundColor: Colors.white,
+                    radius: 60,
+                    backgroundColor:
+                        Colors.white,
                     child: Icon(
                       Icons.attach_money,
-                      size: 72,
+                      size: 70,
                       color: Colors.black,
                     ),
                   ),
 
-                  const SizedBox(height: 25),
+                  const SizedBox(
+                    height: 22,
+                  ),
 
                   const Text(
                     'AS COIN',
                     style: TextStyle(
                       fontSize: 32,
-                      fontWeight: FontWeight.bold,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
 
-                  const SizedBox(height: 8),
+                  const SizedBox(
+                    height: 7,
+                  ),
 
                   const Text(
                     'Secure ASC Network',
                     style: TextStyle(
                       fontSize: 17,
-                      color: Colors.white70,
+                      color:
+                          Colors.white70,
                     ),
                   ),
 
-                  const SizedBox(height: 40),
+                  const SizedBox(
+                    height: 35,
+                  ),
 
                   SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: loading ? null : googleLogin,
-                      icon: const Icon(Icons.account_circle),
-                      label: const Text('Continue with Google'),
+                    width:
+                        double.infinity,
+                    height: 52,
+                    child:
+                        OutlinedButton.icon(
+                      onPressed:
+                          googleLoading
+                              ? null
+                              : googleSignIn,
+                      icon: googleLoading
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child:
+                                  CircularProgressIndicator(
+                                strokeWidth:
+                                    2,
+                              ),
+                            )
+                          : const Icon(
+                              Icons
+                                  .account_circle,
+                            ),
+                      label:
+                          const Text(
+                        'Continue with Google',
+                      ),
                     ),
                   ),
 
-                  const SizedBox(height: 12),
+                  const SizedBox(
+                    height: 12,
+                  ),
 
                   SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: loading ? null : telegramLogin,
-                      icon: const Icon(Icons.send),
-                      label: const Text('Continue with Telegram'),
+                    width:
+                        double.infinity,
+                    height: 52,
+                    child:
+                        OutlinedButton.icon(
+                      onPressed:
+                          Config.backendReady
+                              ? () {
+                                  showMessage(
+                                    'Telegram verification is available through the configured backend.',
+                                  );
+                                }
+                              : null,
+                      icon: const Icon(
+                        Icons.send,
+                      ),
+                      label:
+                          const Text(
+                        'Continue with Telegram',
+                      ),
                     ),
                   ),
 
-                  const SizedBox(height: 25),
+                  const SizedBox(
+                    height: 25,
+                  ),
 
                   const Row(
                     children: [
-                      Expanded(child: Divider()),
-                      Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 12),
-                        child: Text('OR'),
+                      Expanded(
+                        child: Divider(),
                       ),
-                      Expanded(child: Divider()),
+                      Padding(
+                        padding:
+                            EdgeInsets.symmetric(
+                          horizontal: 12,
+                        ),
+                        child:
+                            Text('OR'),
+                      ),
+                      Expanded(
+                        child: Divider(),
+                      ),
                     ],
                   ),
 
-                  const SizedBox(height: 25),
+                  const SizedBox(
+                    height: 25,
+                  ),
 
                   Row(
                     children: [
                       SizedBox(
                         width: 105,
-                        child: DropdownButtonFormField<String>(
-                          value: countryCode,
-                          decoration: const InputDecoration(
-                            labelText: 'Code',
-                            border: OutlineInputBorder(),
+                        child:
+                            DropdownButtonFormField<
+                                String>(
+                          initialValue:
+                              countryCode,
+                          decoration:
+                              const InputDecoration(
+                            labelText:
+                                'Code',
+                            border:
+                                OutlineInputBorder(),
                           ),
                           items: const [
                             DropdownMenuItem(
                               value: '+91',
-                              child: Text('+91'),
+                              child:
+                                  Text('+91'),
                             ),
                             DropdownMenuItem(
                               value: '+1',
-                              child: Text('+1'),
+                              child:
+                                  Text('+1'),
                             ),
                             DropdownMenuItem(
                               value: '+44',
-                              child: Text('+44'),
+                              child:
+                                  Text('+44'),
                             ),
                             DropdownMenuItem(
                               value: '+61',
-                              child: Text('+61'),
+                              child:
+                                  Text('+61'),
                             ),
                             DropdownMenuItem(
                               value: '+971',
-                              child: Text('+971'),
+                              child:
+                                  Text('+971'),
                             ),
                           ],
-                          onChanged: (v) {
-                            if (v != null) {
-                              setState(() => countryCode = v);
+                          onChanged:
+                              (value) {
+                            if (value !=
+                                null) {
+                              setState(() {
+                                countryCode =
+                                    value;
+                              });
                             }
                           },
                         ),
                       ),
 
-                      const SizedBox(width: 12),
+                      const SizedBox(
+                        width: 12,
+                      ),
 
                       Expanded(
-                        child: TextField(
-                          controller: phoneController,
-                          keyboardType: TextInputType.phone,
-                          decoration: const InputDecoration(
-                            labelText: 'Mobile number',
-                            border: OutlineInputBorder(),
+                        child:
+                            TextField(
+                          controller:
+                              phone,
+                          keyboardType:
+                              TextInputType
+                                  .phone,
+                          decoration:
+                              const InputDecoration(
+                            labelText:
+                                'Mobile number',
+                            border:
+                                OutlineInputBorder(),
                           ),
                         ),
                       ),
                     ],
                   ),
 
-                  const SizedBox(height: 18),
-
-                  if (otpSent)
+                  if (otpSent) ...[
+                    const SizedBox(
+                      height: 16,
+                    ),
                     TextField(
-                      controller: otpController,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Verification code',
-                        border: OutlineInputBorder(),
+                      controller: otp,
+                      keyboardType:
+                          TextInputType
+                              .number,
+                      decoration:
+                          const InputDecoration(
+                        labelText:
+                            'Verification code',
+                        border:
+                            OutlineInputBorder(),
                       ),
                     ),
+                  ],
 
-                  if (otpSent) const SizedBox(height: 18),
+                  const SizedBox(
+                    height: 18,
+                  ),
 
                   SizedBox(
-                    width: double.infinity,
+                    width:
+                        double.infinity,
                     height: 54,
-                    child: FilledButton(
-                      onPressed: loading
-                          ? null
-                          : (otpSent ? verifyOtp : sendOtp),
+                    child:
+                        FilledButton(
+                      onPressed:
+                          loading
+                              ? null
+                              : otpSent
+                                  ? verifyOtp
+                                  : sendOtp,
                       child: loading
                           ? const SizedBox(
                               width: 22,
                               height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
+                              child:
+                                  CircularProgressIndicator(
+                                strokeWidth:
+                                    2,
                               ),
                             )
                           : Text(
@@ -820,22 +1099,34 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                   ),
 
-                  const SizedBox(height: 18),
+                  const SizedBox(
+                    height: 18,
+                  ),
 
                   const Text(
                     'One verified identity = one AS COIN account.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white60),
+                    textAlign:
+                        TextAlign.center,
+                    style: TextStyle(
+                      color:
+                          Colors.white60,
+                    ),
                   ),
 
-                  if (!ASApi.configured) ...[
-                    const SizedBox(height: 30),
+                  if (!Config
+                      .backendReady) ...[
+                    const SizedBox(
+                      height: 25,
+                    ),
                     const Text(
                       'Backend connection is not configured.',
-                      textAlign: TextAlign.center,
+                      textAlign:
+                          TextAlign.center,
                       style: TextStyle(
-                        color: Colors.orange,
-                        fontWeight: FontWeight.w600,
+                        color:
+                            Colors.orange,
+                        fontWeight:
+                            FontWeight.bold,
                       ),
                     ),
                   ],
@@ -854,7 +1145,7 @@ class _LoginPageState extends State<LoginPage> {
 // ============================================================
 
 class HomePage extends StatefulWidget {
-  final UserSession session;
+  final Session session;
 
   const HomePage({
     super.key,
@@ -862,11 +1153,13 @@ class HomePage extends StatefulWidget {
   });
 
   @override
-  State<HomePage> createState() => _HomePageState();
+  State<HomePage> createState() =>
+      _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  late UserSession session;
+class _HomePageState
+    extends State<HomePage> {
+  late Session session;
 
   @override
   void initState() {
@@ -876,62 +1169,95 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> refresh() async {
     try {
-      final updated = await ASApi.me(session.token);
+      final updated =
+          await Api.me(
+        session.token,
+      );
 
       if (!mounted) return;
 
-      setState(() => session = updated);
+      setState(() {
+        session = updated;
+      });
     } catch (e) {
       showMessage(
-        e.toString().replaceFirst('Exception: ', ''),
+        cleanError(e),
       );
     }
   }
 
-  void showMessage(String text) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
+  void showMessage(
+    String text,
+  ) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
+      SnackBar(
+        content: Text(text),
+      ),
     );
   }
 
+  String cleanError(
+    Object error,
+  ) {
+    return error
+        .toString()
+        .replaceFirst(
+          'Exception: ',
+          '',
+        );
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('AS COIN'),
+        title:
+            const Text('AS COIN'),
         actions: [
           IconButton(
             onPressed: refresh,
-            icon: const Icon(Icons.refresh),
+            icon:
+                const Icon(Icons.refresh),
           ),
         ],
       ),
-      body: RefreshIndicator(
+      body:
+          RefreshIndicator(
         onRefresh: refresh,
         child: ListView(
-          padding: const EdgeInsets.all(18),
+          padding:
+              const EdgeInsets.all(18),
           children: [
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(22),
+                padding:
+                    const EdgeInsets.all(22),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment:
+                      CrossAxisAlignment
+                          .start,
                   children: [
                     const Text(
                       'ASC Balance',
                       style: TextStyle(
-                        color: Colors.white60,
-                        fontSize: 15,
+                        color:
+                            Colors.white60,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(
+                      height: 8,
+                    ),
                     Text(
                       '${session.balance.toStringAsFixed(2)} ASC',
-                      style: const TextStyle(
+                      style:
+                          const TextStyle(
                         fontSize: 34,
-                        fontWeight: FontWeight.bold,
+                        fontWeight:
+                            FontWeight.bold,
                       ),
                     ),
                   ],
@@ -939,38 +1265,49 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
 
-            const SizedBox(height: 18),
+            const SizedBox(
+              height: 15,
+            ),
 
             Row(
               children: [
                 Expanded(
-                  child: _HomeButton(
-                    icon: Icons.shopping_cart,
-                    title: 'Buy ASC',
+                  child: HomeTile(
+                    icon:
+                        Icons.shopping_cart,
+                    title:
+                        'Buy ASC',
                     onTap: () async {
                       await Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => PurchasePage(
-                            session: session,
+                          builder: (_) =>
+                              PurchasePage(
+                            session:
+                                session,
                           ),
                         ),
                       );
-                      await refresh();
+                      refresh();
                     },
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(
+                  width: 12,
+                ),
                 Expanded(
-                  child: _HomeButton(
-                    icon: Icons.account_balance_wallet,
-                    title: 'Wallet',
+                  child: HomeTile(
+                    icon: Icons.wallet,
+                    title:
+                        'Wallet',
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => WalletPage(
-                            session: session,
+                          builder: (_) =>
+                              WalletPage(
+                            session:
+                                session,
                           ),
                         ),
                       );
@@ -980,38 +1317,49 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(
+              height: 12,
+            ),
 
             Row(
               children: [
                 Expanded(
-                  child: _HomeButton(
-                    icon: Icons.verified_user,
+                  child: HomeTile(
+                    icon:
+                        Icons.verified_user,
                     title: 'KYC',
                     onTap: () async {
                       await Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => KycPage(
-                            session: session,
+                          builder: (_) =>
+                              KycPage(
+                            session:
+                                session,
                           ),
                         ),
                       );
-                      await refresh();
+                      refresh();
                     },
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(
+                  width: 12,
+                ),
                 Expanded(
-                  child: _HomeButton(
-                    icon: Icons.history,
-                    title: 'History',
+                  child: HomeTile(
+                    icon:
+                        Icons.history,
+                    title:
+                        'History',
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => HistoryPage(
-                            session: session,
+                          builder: (_) =>
+                              HistoryPage(
+                            session:
+                                session,
                           ),
                         ),
                       );
@@ -1021,26 +1369,40 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
 
-            const SizedBox(height: 25),
+            const SizedBox(
+              height: 20,
+            ),
 
             Card(
               child: ListTile(
-                leading: const Icon(Icons.security),
-                title: const Text('Account Security'),
-                subtitle: Text(
-                  'KYC: ${session.kycStatus}',
+                leading:
+                    const Icon(
+                  Icons.verified_user,
+                ),
+                title:
+                    const Text(
+                  'KYC Status',
+                ),
+                subtitle:
+                    Text(
+                  session.kycStatus,
                 ),
               ),
             ),
 
-            const SizedBox(height: 12),
-
             Card(
               child: ListTile(
-                leading: const Icon(Icons.inventory_2),
-                title: const Text('Maximum Supply'),
-                subtitle: Text(
-                  '${ASConfig.maxSupply} ASC',
+                leading:
+                    const Icon(
+                  Icons.inventory,
+                ),
+                title:
+                    const Text(
+                  'Maximum Supply',
+                ),
+                subtitle:
+                    const Text(
+                  '21,000,000 ASC',
                 ),
               ),
             ),
@@ -1051,35 +1413,45 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-class _HomeButton extends StatelessWidget {
+class HomeTile
+    extends StatelessWidget {
   final IconData icon;
   final String title;
   final VoidCallback onTap;
 
-  const _HomeButton({
+  const HomeTile({
+    super.key,
     required this.icon,
     required this.title,
     required this.onTap,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Card(
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
         onTap: onTap,
+        borderRadius:
+            BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.symmetric(
+          padding:
+              const EdgeInsets.symmetric(
             vertical: 25,
-            horizontal: 12,
+            horizontal: 10,
           ),
           child: Column(
             children: [
-              Icon(icon, size: 34),
-              const SizedBox(height: 10),
+              Icon(
+                icon,
+                size: 34,
+              ),
+              const SizedBox(
+                height: 10,
+              ),
               Text(
                 title,
-                textAlign: TextAlign.center,
               ),
             ],
           ),
@@ -1093,8 +1465,9 @@ class _HomeButton extends StatelessWidget {
 // PURCHASE
 // ============================================================
 
-class PurchasePage extends StatefulWidget {
-  final UserSession session;
+class PurchasePage
+    extends StatefulWidget {
+  final Session session;
 
   const PurchasePage({
     super.key,
@@ -1102,14 +1475,16 @@ class PurchasePage extends StatefulWidget {
   });
 
   @override
-  State<PurchasePage> createState() => _PurchasePageState();
+  State<PurchasePage> createState() =>
+      _PurchasePageState();
 }
 
-class _PurchasePageState extends State<PurchasePage> {
+class _PurchasePageState
+    extends State<PurchasePage> {
   Purchase? purchase;
   Timer? timer;
-  int secondsLeft = ASConfig.verificationSeconds;
-  bool creating = false;
+
+  bool loading = false;
 
   @override
   void dispose() {
@@ -1117,236 +1492,236 @@ class _PurchasePageState extends State<PurchasePage> {
     super.dispose();
   }
 
-  void message(String text) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
+  void message(
+    String text,
+  ) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
+      SnackBar(
+        content: Text(text),
+      ),
     );
   }
 
-  Future<void> createPayment() async {
-    setState(() => creating = true);
+  Future<void> startPurchase() async {
+    setState(() {
+      loading = true;
+    });
 
     try {
-      final p = await ASApi.createPurchase(widget.session.token);
+      final result =
+          await Api.createPurchase(
+        widget.session.token,
+      );
 
       if (!mounted) return;
 
       setState(() {
-        purchase = p;
-        creating = false;
-        secondsLeft = ASConfig.verificationSeconds;
+        purchase = result;
+        loading = false;
       });
 
-      startVerification();
+      startChecking();
     } catch (e) {
-      setState(() => creating = false);
+      setState(() {
+        loading = false;
+      });
+
       message(
-        e.toString().replaceFirst('Exception: ', ''),
+        cleanError(e),
       );
     }
   }
 
-  void startVerification() {
+  void startChecking() {
     timer?.cancel();
 
     timer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) async {
-        if (purchase == null) return;
-
-        if (secondsLeft > 0) {
-          setState(() {
-            secondsLeft -= 10;
-            if (secondsLeft < 0) secondsLeft = 0;
-          });
-        }
-
-        try {
-          final updated = await ASApi.purchaseStatus(
-            widget.session.token,
-            purchase!.id,
-          );
-
-          if (!mounted) return;
-
-          setState(() => purchase = updated);
-
-          if (updated.status.toLowerCase() == 'confirmed' ||
-              updated.status.toLowerCase() == 'completed') {
-            timer?.cancel();
-
-            message(
-              'Payment verified. ASC has been credited.',
-            );
-          }
-        } catch (_) {
-          // Keep checking.
-        }
-      },
+      const Duration(
+        seconds: 10,
+      ),
+      (_) => checkPayment(),
     );
   }
 
-  String timeText() {
-    final m = secondsLeft ~/ 60;
-    final s = secondsLeft % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
+  Future<void> checkPayment() async {
+    final current =
+        purchase;
+
+    if (current == null) {
+      return;
+    }
+
+    try {
+      final updated =
+          await Api.purchaseStatus(
+        widget.session.token,
+        current.id,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        purchase = updated;
+      });
+
+      if (updated.status
+              .toLowerCase() ==
+          'confirmed') {
+        timer?.cancel();
+
+        message(
+          'Payment verified. ASC credited.',
+        );
+      }
+    } catch (_) {}
+  }
+
+  String cleanError(
+    Object error,
+  ) {
+    return error
+        .toString()
+        .replaceFirst(
+          'Exception: ',
+          '',
+        );
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     final p = purchase;
+
+    final address =
+        p?.depositAddress ??
+            Config.fallbackUsdtAddress;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Buy ASC'),
+        title:
+            const Text('Buy ASC'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(18),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(20),
+              padding:
+                  const EdgeInsets.all(20),
               child: Column(
                 children: [
                   const Text(
                     'ASC Purchase',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
+                    style:
+                        TextStyle(
+                      fontSize: 25,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(height: 20),
-
-                  _info('Payment', '50 USDT'),
-                  _info('ASC Allocation', '5,000 ASC'),
-                  _info('Network', ASConfig.usdtNetwork),
-
-                  const Divider(height: 30),
-
-                  const Text(
-                    'Send exactly 50 USDT using TRC20.',
-                    textAlign: TextAlign.center,
+                  const SizedBox(
+                    height: 18,
                   ),
-
-                  const SizedBox(height: 20),
-
-                  QrImageView(
-                    data: ASConfig.usdtDepositAddress,
-                    size: 220,
-                    backgroundColor: Colors.white,
+                  info(
+                    'Payment',
+                    '50 USDT',
                   ),
-
-                  const SizedBox(height: 20),
-
-                  const Text(
-                    'Deposit Address',
-                    style: TextStyle(
-                      color: Colors.white60,
-                    ),
+                  info(
+                    'ASC',
+                    '5,000 ASC',
                   ),
-
-                  const SizedBox(height: 8),
-
-                  SelectableText(
-                    ASConfig.usdtDepositAddress,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-
-                  const SizedBox(height: 15),
-
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      // Clipboard can be added if desired.
-                      message('Select and copy the address above.');
-                    },
-                    icon: const Icon(Icons.copy),
-                    label: const Text('COPY ADDRESS'),
+                  info(
+                    'Network',
+                    'TRC20 (TRON)',
                   ),
                 ],
               ),
             ),
           ),
 
-          const SizedBox(height: 18),
+          const SizedBox(
+            height: 15,
+          ),
 
-          if (p == null)
-            SizedBox(
-              height: 55,
-              child: FilledButton(
-                onPressed: creating ? null : createPayment,
-                child: creating
-                    ? const CircularProgressIndicator()
-                    : const Text('I HAVE MADE THE PAYMENT'),
-              ),
-            ),
-
-          if (p != null) ...[
+          if (address.isNotEmpty)
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding:
+                    const EdgeInsets.all(20),
                 child: Column(
                   children: [
-                    const Icon(
-                      Icons.sync,
-                      size: 45,
+                    const Text(
+                      'USDT Deposit',
+                      style:
+                          TextStyle(
+                        fontSize: 20,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
                     ),
-                    const SizedBox(height: 12),
+
+                    const SizedBox(
+                      height: 15,
+                    ),
+
+                    QrImageView(
+                      data: address,
+                      size: 220,
+                      backgroundColor:
+                          Colors.white,
+                    ),
+
+                    const SizedBox(
+                      height: 15,
+                    ),
 
                     const Text(
-                      'Payment Verification',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
+                      'TRC20 (TRON)',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white60,
                       ),
                     ),
 
-                    const SizedBox(height: 10),
-
-                    Text(
-                      'Status: ${p.status}',
-                      style: const TextStyle(fontSize: 17),
+                    const SizedBox(
+                      height: 8,
                     ),
 
-                    const SizedBox(height: 12),
+                    SelectableText(
+                      address,
+                      textAlign:
+                          TextAlign.center,
+                    ),
 
-                    if (p.status.toLowerCase() == 'pending')
-                      Text(
-                        'Automatic verification: up to ${timeText()}',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                        ),
+                    const SizedBox(
+                      height: 12,
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        Clipboard.setData(
+                          ClipboardData(
+                            text: address,
+                          ),
+                        );
+
+                        message(
+                          'Address copied.',
+                        );
+                      },
+                      icon:
+                          const Icon(
+                        Icons.copy,
                       ),
-
-                    if (p.txHash != null &&
-                        p.txHash!.isNotEmpty) ...[
-                      const SizedBox(height: 15),
-                      const Text(
-                        'Transaction',
-                        style: TextStyle(
-                          color: Colors.white60,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      SelectableText(
-                        p.txHash!,
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-
-                    const SizedBox(height: 20),
-
-                    const Text(
-                      'A payment screenshot may be uploaded for support records, '
-                      'but ASC will only be credited after blockchain verification.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white60,
+                      label:
+                          const Text(
+                        'COPY ADDRESS',
                       ),
                     ),
                   ],
@@ -1354,44 +1729,118 @@ class _PurchasePageState extends State<PurchasePage> {
               ),
             ),
 
-            const SizedBox(height: 18),
+          const SizedBox(
+            height: 15,
+          ),
 
-            OutlinedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ScannerPage(
-                      title: 'Scan Payment QR',
-                      onScanned: (value) {
-                        Navigator.pop(context);
-                        message(
-                          'QR detected. Blockchain verification remains required.',
-                        );
-                      },
-                    ),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('SCAN QR'),
+          if (p == null)
+            SizedBox(
+              height: 54,
+              child:
+                  FilledButton(
+                onPressed:
+                    loading
+                        ? null
+                        : startPurchase,
+                child: loading
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child:
+                            CircularProgressIndicator(
+                          strokeWidth:
+                              2,
+                        ),
+                      )
+                    : const Text(
+                        'I HAVE MADE THE PAYMENT',
+                      ),
+              ),
             ),
-          ],
+
+          if (p != null)
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    const Icon(
+                      Icons.sync,
+                      size: 50,
+                    ),
+                    const SizedBox(
+                      height: 10,
+                    ),
+                    const Text(
+                      'Payment Verification',
+                      style:
+                          TextStyle(
+                        fontSize: 21,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(
+                      height: 10,
+                    ),
+                    Text(
+                      'Status: ${p.status}',
+                    ),
+                    const SizedBox(
+                      height: 10,
+                    ),
+                    const Text(
+                      'The blockchain will be checked automatically. ASC is credited only after a valid payment is confirmed.',
+                      textAlign:
+                          TextAlign.center,
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white60,
+                      ),
+                    ),
+                    if (p.txHash != null &&
+                        p.txHash!
+                            .isNotEmpty) ...[
+                      const SizedBox(
+                        height: 15,
+                      ),
+                      SelectableText(
+                        p.txHash!,
+                        textAlign:
+                            TextAlign.center,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _info(String title, String value) {
+  Widget info(
+    String a,
+    String b,
+  ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding:
+          const EdgeInsets.symmetric(
+        vertical: 6,
+      ),
       child: Row(
         children: [
-          Expanded(child: Text(title)),
+          Expanded(
+            child: Text(a),
+          ),
           Text(
-            value,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
+            b,
+            style:
+                const TextStyle(
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
         ],
@@ -1404,8 +1853,9 @@ class _PurchasePageState extends State<PurchasePage> {
 // KYC
 // ============================================================
 
-class KycPage extends StatefulWidget {
-  final UserSession session;
+class KycPage
+    extends StatefulWidget {
+  final Session session;
 
   const KycPage({
     super.key,
@@ -1413,10 +1863,12 @@ class KycPage extends StatefulWidget {
   });
 
   @override
-  State<KycPage> createState() => _KycPageState();
+  State<KycPage> createState() =>
+      _KycPageState();
 }
 
-class _KycPageState extends State<KycPage> {
+class _KycPageState
+    extends State<KycPage> {
   String status = 'Pending';
   bool loading = false;
 
@@ -1426,87 +1878,111 @@ class _KycPageState extends State<KycPage> {
     loadStatus();
   }
 
-  void message(String text) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
-    );
-  }
-
   Future<void> loadStatus() async {
     try {
-      final data = await ASApi.kycStatus(
+      final data =
+          await Api.kycStatus(
         widget.session.token,
       );
 
       if (!mounted) return;
 
       setState(() {
-        status = data['status']?.toString() ?? 'Pending';
+        status =
+            data['status']
+                    ?.toString() ??
+                'Pending';
       });
     } catch (_) {}
   }
 
-  Future<void> payKyc() async {
-    setState(() => loading = true);
+  Future<void> startKyc() async {
+    setState(() {
+      loading = true;
+    });
 
     try {
-      final data = await ASApi.createKycPayment(
+      final data =
+          await Api.kycPayment(
         widget.session.token,
       );
 
       if (!mounted) return;
 
-      setState(() => loading = false);
+      setState(() {
+        loading = false;
+      });
 
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => KycPaymentPage(
-            session: widget.session,
-            paymentData: data,
+          builder: (_) =>
+              KycPaymentPage(
+            data: data,
           ),
         ),
       );
     } catch (e) {
-      setState(() => loading = false);
+      setState(() {
+        loading = false;
+      });
 
-      message(
-        e.toString().replaceFirst('Exception: ', ''),
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
+        SnackBar(
+          content: Text(
+            e.toString(),
+          ),
+        ),
       );
     }
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('KYC Verification'),
+        title:
+            const Text('KYC'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(18),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(22),
+              padding:
+                  const EdgeInsets.all(22),
               child: Column(
                 children: [
                   const Icon(
                     Icons.verified_user,
-                    size: 65,
+                    size: 60,
                   ),
-                  const SizedBox(height: 15),
+                  const SizedBox(
+                    height: 12,
+                  ),
                   const Text(
                     'KYC Status',
-                    style: TextStyle(fontSize: 22),
+                    style:
+                        TextStyle(
+                      fontSize: 22,
+                    ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(
+                    height: 8,
+                  ),
                   Text(
                     status,
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
+                    style:
+                        const TextStyle(
+                      fontSize: 27,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
                 ],
@@ -1514,42 +1990,63 @@ class _KycPageState extends State<KycPage> {
             ),
           ),
 
-          const SizedBox(height: 18),
+          const SizedBox(
+            height: 18,
+          ),
 
-          if (status.toLowerCase() != 'verified')
+          if (status.toLowerCase() !=
+              'verified')
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding:
+                    const EdgeInsets.all(20),
                 child: Column(
                   children: [
                     const Text(
-                      'Standard KYC Fee',
-                      style: TextStyle(fontSize: 17),
+                      'Standard KYC',
+                      style:
+                          TextStyle(
+                        fontSize: 19,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(
+                      height: 8,
+                    ),
                     const Text(
                       '1 USDT',
-                      style: TextStyle(
+                      style:
+                          TextStyle(
                         fontSize: 30,
-                        fontWeight: FontWeight.bold,
+                        fontWeight:
+                            FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(
+                      height: 8,
+                    ),
                     const Text(
                       'TRC20 (TRON)',
-                      style: TextStyle(
-                        color: Colors.white60,
-                      ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(
+                      height: 20,
+                    ),
                     SizedBox(
-                      width: double.infinity,
+                      width:
+                          double.infinity,
                       height: 52,
-                      child: FilledButton(
-                        onPressed: loading ? null : payKyc,
+                      child:
+                          FilledButton(
+                        onPressed:
+                            loading
+                                ? null
+                                : startKyc,
                         child: loading
                             ? const CircularProgressIndicator()
-                            : const Text('START KYC'),
+                            : const Text(
+                                'START KYC',
+                              ),
                       ),
                     ),
                   ],
@@ -1566,135 +2063,96 @@ class _KycPageState extends State<KycPage> {
 // KYC PAYMENT
 // ============================================================
 
-class KycPaymentPage extends StatefulWidget {
-  final UserSession session;
-  final Map<String, dynamic> paymentData;
+class KycPaymentPage
+    extends StatelessWidget {
+  final Map<String, dynamic> data;
 
   const KycPaymentPage({
     super.key,
-    required this.session,
-    required this.paymentData,
+    required this.data,
   });
 
   @override
-  State<KycPaymentPage> createState() => _KycPaymentPageState();
-}
-
-class _KycPaymentPageState extends State<KycPaymentPage> {
-  Timer? timer;
-  int seconds = 300;
-  String status = 'Pending';
-
-  @override
-  void initState() {
-    super.initState();
-    timer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) => check(),
-    );
-  }
-
-  @override
-  void dispose() {
-    timer?.cancel();
-    super.dispose();
-  }
-
-  Future<void> check() async {
-    try {
-      final data = await ASApi.kycStatus(
-        widget.session.token,
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        status = data['status']?.toString() ?? status;
-        seconds -= 10;
-        if (seconds < 0) seconds = 0;
-      });
-
-      if (status.toLowerCase() == 'verified') {
-        timer?.cancel();
-      }
-    } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     final address =
-        widget.paymentData['deposit_address']?.toString() ??
-            ASConfig.usdtDepositAddress;
+        data['deposit_address']
+                ?.toString() ??
+            '';
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('KYC Payment'),
+        title:
+            const Text('KYC Payment'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(18),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(20),
+              padding:
+                  const EdgeInsets.all(20),
               child: Column(
                 children: [
                   const Text(
                     'KYC Payment',
-                    style: TextStyle(
-                      fontSize: 25,
-                      fontWeight: FontWeight.bold,
+                    style:
+                        TextStyle(
+                      fontSize: 24,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(height: 18),
-
-                  const Text(
-                    'Amount',
-                    style: TextStyle(color: Colors.white60),
+                  const SizedBox(
+                    height: 15,
                   ),
-
                   const Text(
                     '1 USDT',
-                    style: TextStyle(
+                    style:
+                        TextStyle(
                       fontSize: 30,
-                      fontWeight: FontWeight.bold,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
-
-                  const SizedBox(height: 8),
-
-                  const Text('TRC20 (TRON)'),
-
-                  const SizedBox(height: 20),
-
-                  QrImageView(
-                    data: address,
-                    size: 220,
-                    backgroundColor: Colors.white,
+                  const SizedBox(
+                    height: 8,
                   ),
-
-                  const SizedBox(height: 18),
-
+                  const Text(
+                    'TRC20 (TRON)',
+                  ),
+                  const SizedBox(
+                    height: 20,
+                  ),
+                  if (address.isNotEmpty)
+                    QrImageView(
+                      data: address,
+                      size: 230,
+                      backgroundColor:
+                          Colors.white,
+                    ),
+                  const SizedBox(
+                    height: 18,
+                  ),
                   SelectableText(
                     address,
-                    textAlign: TextAlign.center,
+                    textAlign:
+                        TextAlign.center,
                   ),
-
-                  const SizedBox(height: 20),
-
-                  Text(
-                    'Verification status: $status',
-                    style: const TextStyle(
-                      fontSize: 18,
-                    ),
+                  const SizedBox(
+                    height: 20,
                   ),
-
-                  const SizedBox(height: 8),
-
                   const Text(
-                    'The system will automatically verify the blockchain payment.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white60,
+                    'Payment will be verified automatically on the blockchain.',
+                    textAlign:
+                        TextAlign.center,
+                    style:
+                        TextStyle(
+                      color:
+                          Colors.white60,
                     ),
                   ),
                 ],
@@ -1711,8 +2169,9 @@ class _KycPaymentPageState extends State<KycPaymentPage> {
 // WALLET
 // ============================================================
 
-class WalletPage extends StatelessWidget {
-  final UserSession session;
+class WalletPage
+    extends StatelessWidget {
+  final Session session;
 
   const WalletPage({
     super.key,
@@ -1720,38 +2179,50 @@ class WalletPage extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final address = session.walletAddress;
-
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ASC Wallet'),
+        title:
+            const Text('ASC Wallet'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(18),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(22),
+              padding:
+                  const EdgeInsets.all(22),
               child: Column(
                 children: [
                   const Icon(
                     Icons.account_balance_wallet,
-                    size: 65,
+                    size: 60,
                   ),
-                  const SizedBox(height: 15),
+                  const SizedBox(
+                    height: 12,
+                  ),
                   const Text(
-                    'Available Balance',
-                    style: TextStyle(
-                      color: Colors.white60,
+                    'Balance',
+                    style:
+                        TextStyle(
+                      color:
+                          Colors.white60,
                     ),
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(
+                    height: 5,
+                  ),
                   Text(
                     '${session.balance.toStringAsFixed(2)} ASC',
-                    style: const TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.bold,
+                    style:
+                        const TextStyle(
+                      fontSize: 31,
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
                 ],
@@ -1759,111 +2230,94 @@ class WalletPage extends StatelessWidget {
             ),
           ),
 
-          const SizedBox(height: 15),
-
-          Card(
-            child: ListTile(
-              title: const Text('Wallet Address'),
-              subtitle: Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: SelectableText(
-                  address == null || address.isEmpty
-                      ? 'Wallet address will be provided by the backend.'
-                      : address,
-                ),
-              ),
-            ),
+          const SizedBox(
+            height: 12,
           ),
-
-          const SizedBox(height: 15),
 
           Row(
             children: [
               Expanded(
-                child: _WalletAction(
-                  icon: Icons.call_received,
-                  title: 'Receive',
-                  onTap: () {
+                child:
+                    FilledButton.tonalIcon(
+                  onPressed: () {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => ReceivePage(
-                          session: session,
+                        builder: (_) =>
+                            ReceivePage(
+                          session:
+                              session,
                         ),
                       ),
                     );
                   },
+                  icon:
+                      const Icon(
+                    Icons.call_received,
+                  ),
+                  label:
+                      const Text(
+                    'RECEIVE',
+                  ),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(
+                width: 10,
+              ),
               Expanded(
-                child: _WalletAction(
-                  icon: Icons.call_made,
-                  title: 'Send',
-                  onTap: () {
+                child:
+                    FilledButton.tonalIcon(
+                  onPressed: () {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => SendPage(
-                          session: session,
+                        builder: (_) =>
+                            SendPage(
+                          session:
+                              session,
                         ),
                       ),
                     );
                   },
+                  icon:
+                      const Icon(
+                    Icons.call_made,
+                  ),
+                  label:
+                      const Text(
+                    'SEND',
+                  ),
                 ),
               ),
             ],
           ),
 
-          const SizedBox(height: 12),
+          const SizedBox(
+            height: 12,
+          ),
 
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => HistoryPage(
-                      session: session,
-                    ),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      HistoryPage(
+                    session: session,
                   ),
-                );
-              },
-              icon: const Icon(Icons.history),
-              label: const Text('TRANSACTION HISTORY'),
+                ),
+              );
+            },
+            icon:
+                const Icon(
+              Icons.history,
+            ),
+            label:
+                const Text(
+              'TRANSACTION HISTORY',
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _WalletAction extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final VoidCallback onTap;
-
-  const _WalletAction({
-    required this.icon,
-    required this.title,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return FilledButton.tonal(
-      onPressed: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 18),
-        child: Column(
-          children: [
-            Icon(icon),
-            const SizedBox(height: 7),
-            Text(title),
-          ],
-        ),
       ),
     );
   }
@@ -1873,8 +2327,9 @@ class _WalletAction extends StatelessWidget {
 // RECEIVE
 // ============================================================
 
-class ReceivePage extends StatelessWidget {
-  final UserSession session;
+class ReceivePage
+    extends StatelessWidget {
+  final Session session;
 
   const ReceivePage({
     super.key,
@@ -1882,80 +2337,103 @@ class ReceivePage extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final address = session.walletAddress;
+  Widget build(
+    BuildContext context,
+  ) {
+    final address =
+        session.walletAddress;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Receive ASC'),
+        title:
+            const Text('Receive ASC'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(20),
         children: [
-          if (address == null || address.isEmpty)
+          if (address == null ||
+              address.isEmpty)
             const Card(
               child: Padding(
-                padding: EdgeInsets.all(20),
+                padding:
+                    EdgeInsets.all(20),
                 child: Text(
-                  'Your ASC wallet address is not available yet.',
-                  textAlign: TextAlign.center,
+                  'ASC wallet address is not available yet.',
+                  textAlign:
+                      TextAlign.center,
                 ),
               ),
             )
           else ...[
             const Text(
               'Scan to receive ASC',
-              textAlign: TextAlign.center,
-              style: TextStyle(
+              textAlign:
+                  TextAlign.center,
+              style:
+                  TextStyle(
                 fontSize: 20,
-                fontWeight: FontWeight.bold,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(
+              height: 20,
+            ),
 
             Center(
-              child: QrImageView(
+              child:
+                  QrImageView(
                 data: address,
                 size: 260,
-                backgroundColor: Colors.white,
+                backgroundColor:
+                    Colors.white,
               ),
             ),
 
-            const SizedBox(height: 25),
-
-            const Text(
-              'ASC Wallet Address',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.white60,
-              ),
+            const SizedBox(
+              height: 20,
             ),
-
-            const SizedBox(height: 8),
 
             SelectableText(
               address,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-              ),
+              textAlign:
+                  TextAlign.center,
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(
+              height: 15,
+            ),
 
             OutlinedButton.icon(
               onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
+                Clipboard.setData(
+                  ClipboardData(
+                    text: address,
+                  ),
+                );
+
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(
                   const SnackBar(
-                    content: Text(
-                      'Select and copy the wallet address above.',
+                    content:
+                        Text(
+                      'Address copied.',
                     ),
                   ),
                 );
               },
-              icon: const Icon(Icons.copy),
-              label: const Text('COPY ADDRESS'),
+              icon:
+                  const Icon(
+                Icons.copy,
+              ),
+              label:
+                  const Text(
+                'COPY ADDRESS',
+              ),
             ),
           ],
         ],
@@ -1968,8 +2446,9 @@ class ReceivePage extends StatelessWidget {
 // SEND
 // ============================================================
 
-class SendPage extends StatefulWidget {
-  final UserSession session;
+class SendPage
+    extends StatefulWidget {
+  final Session session;
 
   const SendPage({
     super.key,
@@ -1977,138 +2456,191 @@ class SendPage extends StatefulWidget {
   });
 
   @override
-  State<SendPage> createState() => _SendPageState();
+  State<SendPage> createState() =>
+      _SendPageState();
 }
 
-class _SendPageState extends State<SendPage> {
-  final addressController = TextEditingController();
-  final amountController = TextEditingController();
+class _SendPageState
+    extends State<SendPage> {
+  final address =
+      TextEditingController();
+
+  final amount =
+      TextEditingController();
 
   bool loading = false;
 
   @override
   void dispose() {
-    addressController.dispose();
-    amountController.dispose();
+    address.dispose();
+    amount.dispose();
     super.dispose();
   }
 
-  void message(String text) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text)),
-    );
-  }
-
   Future<void> send() async {
-    final address = addressController.text.trim();
-    final amount = double.tryParse(
-      amountController.text.trim(),
+    final target =
+        address.text.trim();
+
+    final value =
+        double.tryParse(
+      amount.text.trim(),
     );
 
-    if (address.isEmpty) {
-      message('Enter the recipient wallet address.');
+    if (target.isEmpty) {
+      show('Enter recipient address.');
       return;
     }
 
-    if (amount == null || amount <= 0) {
-      message('Enter a valid ASC amount.');
+    if (value == null ||
+        value <= 0) {
+      show('Enter a valid ASC amount.');
       return;
     }
 
-    if (amount > widget.session.balance) {
-      message('Insufficient ASC balance.');
+    if (value >
+        widget.session.balance) {
+      show('Insufficient ASC balance.');
       return;
     }
 
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+    });
 
     try {
-      final data = await ASApi.sendAsc(
+      final result =
+          await Api.send(
         widget.session.token,
-        address,
-        amount,
+        target,
+        value,
       );
 
       if (!mounted) return;
 
-      setState(() => loading = false);
-
-      message(
-        data['message']?.toString() ??
-            'ASC transfer submitted successfully.',
+      show(
+        result['message']?.toString() ??
+            'ASC transfer submitted.',
       );
     } catch (e) {
-      setState(() => loading = false);
-
-      message(
-        e.toString().replaceFirst('Exception: ', ''),
+      show(
+        e.toString(),
       );
+    } finally {
+      if (mounted) {
+        setState(() {
+          loading = false;
+        });
+      }
     }
   }
 
+  void show(
+    String text,
+  ) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(
+      SnackBar(
+        content: Text(text),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Send ASC'),
+        title:
+            const Text('Send ASC'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      body:
+          ListView(
+        padding:
+            const EdgeInsets.all(20),
         children: [
           TextField(
-            controller: addressController,
+            controller: address,
             maxLines: 3,
-            decoration: const InputDecoration(
-              labelText: 'Recipient wallet address',
-              border: OutlineInputBorder(),
+            decoration:
+                const InputDecoration(
+              labelText:
+                  'Recipient wallet address',
+              border:
+                  OutlineInputBorder(),
             ),
           ),
 
-          const SizedBox(height: 15),
+          const SizedBox(
+            height: 12,
+          ),
 
           OutlinedButton.icon(
             onPressed: () {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ScannerPage(
-                    title: 'Scan ASC Address',
-                    onScanned: (value) {
-                      addressController.text = value;
-                      Navigator.pop(context);
+                  builder: (_) =>
+                      ScannerPage(
+                    onScan: (value) {
+                      address.text =
+                          value;
+                      Navigator.pop(
+                        context,
+                      );
                     },
                   ),
                 ),
               );
             },
-            icon: const Icon(Icons.qr_code_scanner),
-            label: const Text('SCAN QR'),
+            icon:
+                const Icon(
+              Icons.qr_code_scanner,
+            ),
+            label:
+                const Text(
+              'SCAN QR',
+            ),
           ),
 
-          const SizedBox(height: 15),
+          const SizedBox(
+            height: 15,
+          ),
 
           TextField(
-            controller: amountController,
-            keyboardType: const TextInputType.numberWithOptions(
+            controller: amount,
+            keyboardType:
+                const TextInputType
+                    .numberWithOptions(
               decimal: true,
             ),
-            decoration: const InputDecoration(
-              labelText: 'ASC amount',
-              border: OutlineInputBorder(),
+            decoration:
+                const InputDecoration(
+              labelText:
+                  'ASC amount',
+              border:
+                  OutlineInputBorder(),
             ),
           ),
 
-          const SizedBox(height: 25),
+          const SizedBox(
+            height: 22,
+          ),
 
           SizedBox(
             height: 54,
-            child: FilledButton(
-              onPressed: loading ? null : send,
+            child:
+                FilledButton(
+              onPressed:
+                  loading
+                      ? null
+                      : send,
               child: loading
                   ? const CircularProgressIndicator()
-                  : const Text('SEND ASC'),
+                  : const Text(
+                      'SEND ASC',
+                    ),
             ),
           ),
         ],
@@ -2121,40 +2653,51 @@ class _SendPageState extends State<SendPage> {
 // QR SCANNER
 // ============================================================
 
-class ScannerPage extends StatefulWidget {
-  final String title;
-  final ValueChanged<String> onScanned;
+class ScannerPage
+    extends StatefulWidget {
+  final ValueChanged<String> onScan;
 
   const ScannerPage({
     super.key,
-    required this.title,
-    required this.onScanned,
+    required this.onScan,
   });
 
   @override
-  State<ScannerPage> createState() => _ScannerPageState();
+  State<ScannerPage> createState() =>
+      _ScannerPageState();
 }
 
-class _ScannerPageState extends State<ScannerPage> {
-  bool scanned = false;
+class _ScannerPageState
+    extends State<ScannerPage> {
+  bool found = false;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.title),
+        title:
+            const Text('Scan QR'),
       ),
-      body: MobileScanner(
-        onDetect: (capture) {
-          if (scanned) return;
+      body:
+          MobileScanner(
+        onDetect:
+            (capture) {
+          if (found) return;
 
-          for (final barcode in capture.barcodes) {
-            final value = barcode.rawValue;
+          for (final barcode
+              in capture.barcodes) {
+            final value =
+                barcode.rawValue;
 
-            if (value != null && value.isNotEmpty) {
-              scanned = true;
-              widget.onScanned(value);
-              break;
+            if (value != null &&
+                value.isNotEmpty) {
+              found = true;
+              widget.onScan(
+                value,
+              );
+              return;
             }
           }
         },
@@ -2167,8 +2710,9 @@ class _ScannerPageState extends State<ScannerPage> {
 // HISTORY
 // ============================================================
 
-class HistoryPage extends StatefulWidget {
-  final UserSession session;
+class HistoryPage
+    extends StatefulWidget {
+  final Session session;
 
   const HistoryPage({
     super.key,
@@ -2176,12 +2720,16 @@ class HistoryPage extends StatefulWidget {
   });
 
   @override
-  State<HistoryPage> createState() => _HistoryPageState();
+  State<HistoryPage> createState() =>
+      _HistoryPageState();
 }
 
-class _HistoryPageState extends State<HistoryPage> {
+class _HistoryPageState
+    extends State<HistoryPage> {
   bool loading = true;
-  List<ASCTx> transactions = [];
+
+  List<WalletTransaction>
+      transactions = [];
 
   @override
   void initState() {
@@ -2191,66 +2739,103 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> load() async {
     try {
-      final data = await ASApi.transactions(
+      final result =
+          await Api.history(
         widget.session.token,
       );
 
       if (!mounted) return;
 
       setState(() {
-        transactions = data;
+        transactions =
+            result;
         loading = false;
       });
     } catch (_) {
       if (!mounted) return;
-      setState(() => loading = false);
+
+      setState(() {
+        loading = false;
+      });
     }
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transaction History'),
+        title:
+            const Text(
+          'Transaction History',
+        ),
       ),
-      body: loading
-          ? const Center(
-              child: CircularProgressIndicator(),
-            )
-          : transactions.isEmpty
+      body:
+          loading
               ? const Center(
-                  child: Text('No transactions yet.'),
+                  child:
+                      CircularProgressIndicator(),
                 )
-              : RefreshIndicator(
-                  onRefresh: load,
-                  child: ListView.builder(
-                    itemCount: transactions.length,
-                    itemBuilder: (_, index) {
-                      final tx = transactions[index];
+              : transactions
+                      .isEmpty
+                  ? const Center(
+                      child:
+                          Text(
+                        'No transactions yet.',
+                      ),
+                    )
+                  : RefreshIndicator(
+                      onRefresh:
+                          load,
+                      child:
+                          ListView
+                              .builder(
+                        itemCount:
+                            transactions
+                                .length,
+                        itemBuilder:
+                            (_, index) {
+                          final tx =
+                              transactions[
+                                  index];
 
-                      return Card(
-                        margin: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        child: ListTile(
-                          leading: Icon(
-                            tx.type.toLowerCase() == 'receive'
-                                ? Icons.call_received
-                                : Icons.call_made,
-                          ),
-                          title: Text(
-                            '${tx.amount.toStringAsFixed(2)} ASC',
-                          ),
-                          subtitle: Text(
-                            '${tx.type}\n${tx.status}',
-                          ),
-                          isThreeLine: true,
-                        ),
-                      );
-                    },
-                  ),
-                ),
+                          return Card(
+                            margin:
+                                const EdgeInsets
+                                    .symmetric(
+                              horizontal:
+                                  12,
+                              vertical:
+                                  6,
+                            ),
+                            child:
+                                ListTile(
+                              leading:
+                                  Icon(
+                                tx.type
+                                            .toLowerCase() ==
+                                        'receive'
+                                    ? Icons
+                                        .call_received
+                                    : Icons
+                                        .call_made,
+                              ),
+                              title:
+                                  Text(
+                                '${tx.amount.toStringAsFixed(2)} ASC',
+                              ),
+                              subtitle:
+                                  Text(
+                                '${tx.type}\n${tx.status}',
+                              ),
+                              isThreeLine:
+                                  true,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
     );
   }
 }
