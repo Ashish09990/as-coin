@@ -1,3 +1,4 @@
+name: as_coin
 dependencies:
   flutter:
     sdk: flutter
