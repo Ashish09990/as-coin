@@ -21,10 +21,18 @@ jobs:
 
       - name: Create Android project files
         run: |
-          flutter create --platforms=android .
+          flutter create --platforms=android --org com.ascoin .
 
       - name: Get dependencies
         run: flutter pub get
+
+      - name: Show Android SHA-1
+        run: |
+          keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android | grep "SHA1:"
 
       - name: Build APK
         run: flutter build apk --release
