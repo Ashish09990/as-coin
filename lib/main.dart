@@ -631,8 +631,9 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() => loading = true);
     try {
-      setState(() => session = await ASCApi.startMining());
-      msg('Mining started.');
+      final updated = await ASCApi.startMining();
+if (!mounted) return;
+setState(() => session = updated);
     } catch (e) {
       msg(e.toString());
     } finally {
@@ -655,7 +656,9 @@ class _HomePageState extends State<HomePage> {
     }
     setState(() => loading = true);
     try {
-      setState(() => session = await ASCApi.claimMining());
+      final updated = await ASCApi.claimMining();
+if (!mounted) return;
+setState(() => session = updated);
       msg('0.14 ASC credited by server.');
     } catch (e) {
       msg(e.toString());
