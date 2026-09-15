@@ -1,14 +1,20 @@
 name: as_coin
+description: AS COIN mobile wallet and token purchase app.
+publish_to: "none"
+version: 1.0.0+1
 
 environment:
-  sdk: ^3.13.0
+  sdk: ">=3.7.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  http: ^1.5.0
-  shared_preferences: ^2.5.3
+  http: ^1.6.0
+  shared_preferences: ^2.5.5
   qr_flutter: ^4.1.0
-  mobile_scanner: ^7.0.1
-google_sign_in: ^7.2.0
+  mobile_scanner: ^7.4.2
+  google_sign_in: ^7.2.0
+
+flutter:
+  uses-material-design: true
