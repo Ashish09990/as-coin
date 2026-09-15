@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+httpx
+python-jose[cryptography]
+google-auth
+psycopg2-binary
