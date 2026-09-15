@@ -29,10 +29,10 @@ jobs:
       - name: Build APK
         run: flutter build apk --release
 
-      - name: Show SHA-1
+      - name: Show APK SHA-1
         run: |
-          find ~/.gradle ~/.android build -type f \( -name "*.keystore" -o -name "*.jks" -o -name "*.apk" \) -print
-          echo "SHA-1 will be obtained from the generated signing certificate"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
