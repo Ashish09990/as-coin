@@ -1,50 +1,39 @@
 import os
-import uuid
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends, HTTPException, Header
+from pydantic import BaseModel, Field
+from jose import jwt, JWTError
 from sqlalchemy import (
     create_engine,
     String,
     Float,
-    DateTime,
     Boolean,
+    DateTime,
     Text,
     ForeignKey,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
     mapped_column,
     sessionmaker,
+    Session,
 )
-from jose import jwt
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
 
+APP_NAME = "AS COIN"
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-APP_NAME = "AS COIN API"
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    JWT_SECRET = secrets.token_urlsafe(48)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "sqlite:///./ascoin.db",
 )
-
-JWT_SECRET = os.getenv(
-    "JWT_SECRET",
-    "CHANGE_THIS_SECRET_BEFORE_PRODUCTION",
-)
-
-JWT_ALGORITHM = "HS256"
-JWT_DAYS = 30
 
 GOOGLE_CLIENT_ID = os.getenv(
     "GOOGLE_CLIENT_ID",
@@ -56,32 +45,51 @@ TELEGRAM_GATEWAY_TOKEN = os.getenv(
     "",
 )
 
-TRONGRID_API_KEY = os.getenv(
-    "TRONGRID_API_KEY",
+USDT_TRON_ADDRESS = os.getenv(
+    "USDT_TRON_ADDRESS",
     "",
 )
 
-USDT_DEPOSIT_ADDRESS = os.getenv(
-    "USDT_DEPOSIT_ADDRESS",
-    "TYskeHD53kcs9ksb5ymBGubtJAJpQPkND2",
+TRON_API_KEY = os.getenv(
+    "TRON_API_KEY",
+    "",
 )
 
-USDT_CONTRACT = os.getenv(
-    "USDT_CONTRACT",
+TRON_USDT_CONTRACT = os.getenv(
+    "TRON_USDT_CONTRACT",
     "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
 )
 
 PACKAGE_USDT = 50.0
 PACKAGE_ASC = 5000.0
 
-KYC_USDT = 1.0
+KYC_FEE_USDT = 1.0
 
-TRONGRID_URL = "https://api.trongrid.io"
+MAX_SUPPLY = 21_000_000.0
 
 
 # ============================================================
 # DATABASE
 # ============================================================
+
+connect_args = {}
+
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {
+        "check_same_thread": False
+    }
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=connect_args,
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -90,26 +98,28 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        primary_key=True,
+    id: Mapped[int] = mapped_column(
+        primary_key=True
     )
 
-    phone: Mapped[str | None] = mapped_column(
+    phone: Mapped[Optional[str]] = mapped_column(
         String(32),
         unique=True,
+        index=True,
         nullable=True,
     )
 
-    email: Mapped[str | None] = mapped_column(
+    google_sub: Mapped[Optional[str]] = mapped_column(
         String(255),
         unique=True,
+        index=True,
         nullable=True,
     )
 
-    telegram_id: Mapped[str | None] = mapped_column(
-        String(128),
+    telegram_user_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
         unique=True,
+        index=True,
         nullable=True,
     )
 
@@ -120,27 +130,20 @@ class User(Base):
 
     kyc_status: Mapped[str] = mapped_column(
         String(32),
-        default="Pending",
-    )
-
-    wallet_address: Mapped[str | None] = mapped_column(
-        String(128),
-        unique=True,
-        nullable=True,
+        default="pending",
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
 
 
-class OtpRequest(Base):
-    __tablename__ = "otp_requests"
+class Otp(Base):
+    __tablename__ = "otps"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        primary_key=True,
+    id: Mapped[int] = mapped_column(
+        primary_key=True
     )
 
     phone: Mapped[str] = mapped_column(
@@ -148,18 +151,16 @@ class OtpRequest(Base):
         index=True,
     )
 
-    telegram_request_id: Mapped[str | None] = mapped_column(
-        String(128),
-        nullable=True,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
+    code_hash: Mapped[str] = mapped_column(
+        String(128)
     )
 
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True)
+    )
+
+    attempts: Mapped[int] = mapped_column(
+        default=0
     )
 
     used: Mapped[bool] = mapped_column(
@@ -171,145 +172,175 @@ class OtpRequest(Base):
 class Purchase(Base):
     __tablename__ = "purchases"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        primary_key=True,
+    id: Mapped[int] = mapped_column(
+        primary_key=True
     )
 
-    user_id: Mapped[str] = mapped_column(
+    user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id"),
         index=True,
     )
 
-    usdt: Mapped[float] = mapped_column(
+    amount_usdt: Mapped[float] = mapped_column(
         Float,
+        default=PACKAGE_USDT,
     )
 
-    asc: Mapped[float] = mapped_column(
+    amount_asc: Mapped[float] = mapped_column(
         Float,
+        default=PACKAGE_ASC,
+    )
+
+    deposit_address: Mapped[str] = mapped_column(
+        String(64)
     )
 
     status: Mapped[str] = mapped_column(
         String(32),
-        default="Pending",
+        default="pending",
     )
 
-    tx_hash: Mapped[str | None] = mapped_column(
+    txid: Mapped[Optional[str]] = mapped_column(
         String(128),
         unique=True,
         nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
 
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
-    )
-
-
-class Transaction(Base):
-    __tablename__ = "transactions"
-
-    id: Mapped[str] = mapped_column(
-        String(64),
-        primary_key=True,
-    )
-
-    user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id"),
-        index=True,
-    )
-
-    tx_type: Mapped[str] = mapped_column(
-        String(32),
-    )
-
-    amount: Mapped[float] = mapped_column(
-        Float,
-    )
-
-    address: Mapped[str] = mapped_column(
-        String(128),
-    )
-
-    status: Mapped[str] = mapped_column(
-        String(32),
-    )
-
-    tx_hash: Mapped[str | None] = mapped_column(
-        String(128),
-        nullable=True,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=lambda: datetime.now(timezone.utc),
     )
 
 
 class KycPayment(Base):
     __tablename__ = "kyc_payments"
 
-    id: Mapped[str] = mapped_column(
-        String(64),
-        primary_key=True,
+    id: Mapped[int] = mapped_column(
+        primary_key=True
     )
 
-    user_id: Mapped[str] = mapped_column(
+    user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id"),
         index=True,
     )
 
-    amount: Mapped[float] = mapped_column(
+    amount_usdt: Mapped[float] = mapped_column(
         Float,
-        default=1.0,
+        default=KYC_FEE_USDT,
+    )
+
+    deposit_address: Mapped[str] = mapped_column(
+        String(64)
     )
 
     status: Mapped[str] = mapped_column(
         String(32),
-        default="Pending",
+        default="pending",
     )
 
-    tx_hash: Mapped[str | None] = mapped_column(
+    txid: Mapped[Optional[str]] = mapped_column(
         String(128),
         unique=True,
         nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class Ledger(Base):
+    __tablename__ = "ledger"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        index=True,
+    )
+
+    kind: Mapped[str] = mapped_column(
+        String(32)
+    )
+
+    amount: Mapped[float] = mapped_column(
+        Float
+    )
+
+    reference: Mapped[str] = mapped_column(
+        String(128),
+        unique=True,
+    )
+
+    note: Mapped[str] = mapped_column(
+        Text,
+        default="",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
 
 
-# SQLite is fine for initial testing.
-// Production should use PostgreSQL.
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},
-    )
-else:
-    engine = create_engine(
-        DATABASE_URL,
-        pool_pre_ping=True,
+class WalletTransaction(Base):
+    __tablename__ = "wallet_transactions"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
     )
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    autocommit=False,
-)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        index=True,
+    )
+
+    kind: Mapped[str] = mapped_column(
+        String(32)
+    )
+
+    amount: Mapped[float] = mapped_column(
+        Float
+    )
+
+    address: Mapped[str] = mapped_column(
+        String(128)
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+    )
+
+    txid: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
 
 Base.metadata.create_all(engine)
 
 
 # ============================================================
-# APP
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
@@ -318,366 +349,369 @@ app = FastAPI(
 )
 
 
-@app.get("/")
-def root():
-    return {
-        "app": "AS COIN",
-        "status": "online",
-    }
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-    }
-
-
 # ============================================================
-# MODELS
+# REQUEST MODELS
 # ============================================================
 
-class PhoneOtpRequest(BaseModel):
+class PhoneRequest(BaseModel):
+    phone: str = Field(
+        min_length=8,
+        max_length=32,
+    )
+
+
+class OtpVerify(BaseModel):
     phone: str
+    code: str = Field(
+        min_length=4,
+        max_length=8,
+    )
 
 
-class PhoneOtpVerify(BaseModel):
-    phone: str
-    otp: str
+class GoogleRequest(BaseModel):
+    id_token: str = Field(
+        min_length=20
+    )
 
 
-class GoogleLoginRequest(BaseModel):
-    id_token: str
+class TelegramRequest(BaseModel):
+    phone: str = Field(
+        min_length=8,
+        max_length=32,
+    )
 
 
-class TelegramLoginRequest(BaseModel):
-    telegram_data: str
+class SendRequest(BaseModel):
+    address: str = Field(
+        min_length=20,
+        max_length=128,
+    )
 
-
-class SendAscRequest(BaseModel):
-    address: str
-    amount: float
+    amount: float = Field(
+        gt=0
+    )
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
+def db_dep():
+    db = SessionLocal()
+
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 def now():
     return datetime.now(timezone.utc)
 
 
-def create_token(user_id: str):
+def token_for(user: User) -> str:
     payload = {
-        "sub": user_id,
-        "exp": now() + timedelta(days=JWT_DAYS),
+        "sub": str(user.id),
+        "exp": now() + timedelta(days=30),
     }
 
     return jwt.encode(
         payload,
         JWT_SECRET,
-        algorithm=JWT_ALGORITHM,
+        algorithm="HS256",
     )
 
 
-def get_user_from_token(
-    authorization: str | None,
-):
-    if not authorization:
-        raise HTTPException(
-            status_code=401,
-            detail="Authorization required.",
-        )
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authorization.",
-        )
-
-    token = authorization[7:]
-
-    try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-        )
-
-        user_id = payload.get("sub")
-
-        if not user_id:
-            raise Exception()
-
-    except Exception:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired session.",
-        )
-
-    db = SessionLocal()
-
-    try:
-        user = db.get(User, user_id)
-
-        if not user:
-            raise HTTPException(
-                status_code=404,
-                detail="User not found.",
-            )
-
-        return user
-    finally:
-        db.close()
-
-
-def user_json(user: User, token: str | None = None):
-    return {
-        "token": token or "",
-        "user_id": user.id,
-        "phone": user.phone,
-        "email": user.email,
-        "telegram_id": user.telegram_id,
-        "balance": user.balance,
-        "kyc_status": user.kyc_status,
-        "wallet_address": user.wallet_address,
-    }
-
-
-# ============================================================
-# TELEGRAM GATEWAY OTP
-# ============================================================
-
-@app.post("/auth/request-otp")
-async def request_otp(data: PhoneOtpRequest):
-
-    phone = data.phone.strip()
+def normalize_phone(phone: str) -> str:
+    phone = (
+        phone
+        .strip()
+        .replace(" ", "")
+        .replace("-", "")
+    )
 
     if not phone.startswith("+"):
         raise HTTPException(
-            status_code=400,
-            detail="Phone number must use international format.",
+            400,
+            "Phone must use international format, for example +91XXXXXXXXXX",
         )
 
-    if not TELEGRAM_GATEWAY_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="Telegram verification is not configured.",
-        )
+    return phone
 
-    request_id = str(uuid.uuid4())
 
-    url = (
-        "https://gatewayapi.telegram.org/"
-        "sendVerificationMessage"
+def make_otp_hash(code: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        (code + JWT_SECRET).encode()
+    ).hexdigest()
+
+
+def verify_otp_hash(
+    code: str,
+    stored: str,
+) -> bool:
+
+    return secrets.compare_digest(
+        make_otp_hash(code),
+        stored,
     )
 
-    headers = {
-        "Authorization": (
-            f"Bearer {TELEGRAM_GATEWAY_TOKEN}"
-        ),
-        "Content-Type": "application/json",
-    }
 
-    body = {
-        "phone_number": phone,
-        "code_length": 6,
-        "ttl": 300,
-        "payload": request_id,
-    }
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            url,
-            headers=headers,
-            json=body,
-        )
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=400,
-            detail=result.get(
-                "error",
-                "Telegram verification failed.",
-            ),
-        )
-
-    telegram_request_id = (
-        result.get("result", {})
-        .get("request_id")
-    )
-
-    if not telegram_request_id:
-        raise HTTPException(
-            status_code=500,
-            detail="Telegram did not return a request ID.",
-        )
-
-    db = SessionLocal()
-
-    try:
-        record = OtpRequest(
-            id=request_id,
-            phone=phone,
-            telegram_request_id=str(
-                telegram_request_id
-            ),
-            created_at=now(),
-            expires_at=now() + timedelta(minutes=5),
-        )
-
-        db.add(record)
-        db.commit()
-
-    finally:
-        db.close()
+def serialize_user(user: User):
 
     return {
-        "message": "Verification code sent via Telegram.",
+        "id": user.id,
+        "phone": user.phone,
+        "balance": user.balance,
+        "kyc_status": user.kyc_status,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
+def current_user(
+    authorization: Optional[str] = Header(
+        default=None
+    ),
+    db: Session = Depends(db_dep),
+):
+
+    if (
+        not authorization
+        or not authorization.lower().startswith("bearer ")
+    ):
+        raise HTTPException(
+            401,
+            "Authentication required",
+        )
+
+    token = authorization.split(
+        " ",
+        1,
+    )[1]
+
+    try:
+
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+        )
+
+        uid = int(
+            payload["sub"]
+        )
+
+    except (
+        JWTError,
+        KeyError,
+        ValueError,
+    ):
+
+        raise HTTPException(
+            401,
+            "Invalid or expired token",
+        )
+
+    user = db.get(
+        User,
+        uid,
+    )
+
+    if not user:
+
+        raise HTTPException(
+            401,
+            "User not found",
+        )
+
+    return user
+
+
+def require_deposit_address():
+
+    if not USDT_TRON_ADDRESS:
+
+        raise HTTPException(
+            503,
+            "USDT TRC20 receiving address is not configured",
+        )
+
+    return USDT_TRON_ADDRESS
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "ok",
+        "app": APP_NAME,
+        "network": "TRC20 (TRON)",
+        "package_usdt": PACKAGE_USDT,
+        "package_asc": PACKAGE_ASC,
+        "max_supply": MAX_SUPPLY,
+        "usdt_address_configured": bool(
+            USDT_TRON_ADDRESS
+        ),
+    }
+
+
+# ============================================================
+# PHONE OTP
+# ============================================================
+
+@app.post("/auth/request-otp")
+def request_otp(
+    data: PhoneRequest,
+    db: Session = Depends(db_dep),
+):
+
+    phone = normalize_phone(
+        data.phone
+    )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+
+    otp = Otp(
+        phone=phone,
+        code_hash=make_otp_hash(code),
+        expires_at=now() + timedelta(minutes=5),
+    )
+
+    db.add(otp)
+    db.commit()
+
+    if TELEGRAM_GATEWAY_TOKEN:
+
+        try:
+
+            with httpx.Client(
+                timeout=15
+            ) as client:
+
+                response = client.post(
+                    "https://gatewayapi.telegram.org/sendVerificationMessage",
+                    headers={
+                        "Authorization":
+                        f"Bearer {TELEGRAM_GATEWAY_TOKEN}"
+                    },
+                    json={
+                        "phone_number": phone,
+                        "code": code,
+                        "code_length": 6,
+                        "ttl": 300,
+                    },
+                )
+
+                if response.status_code >= 400:
+
+                    raise HTTPException(
+                        502,
+                        "Telegram OTP provider rejected the request",
+                    )
+
+        except httpx.HTTPError:
+
+            raise HTTPException(
+                502,
+                "Telegram OTP provider is unavailable",
+            )
+
+        return {
+            "sent": True,
+            "channel": "telegram_gateway",
+        }
+
+    return {
+        "sent": False,
+        "channel": "not_configured",
+        "message": "OTP provider is not configured",
     }
 
 
 @app.post("/auth/verify-otp")
-async def verify_otp(data: PhoneOtpVerify):
+def verify_otp(
+    data: OtpVerify,
+    db: Session = Depends(db_dep),
+):
 
-    phone = data.phone.strip()
-    otp = data.otp.strip()
-
-    db = SessionLocal()
-
-    try:
-        record = (
-            db.query(OtpRequest)
-            .filter(
-                OtpRequest.phone == phone,
-                OtpRequest.used == False,
-            )
-            .order_by(
-                OtpRequest.created_at.desc()
-            )
-            .first()
-        )
-
-        if not record:
-            raise HTTPException(
-                status_code=400,
-                detail="Verification request not found.",
-            )
-
-        if record.expires_at < now():
-            raise HTTPException(
-                status_code=400,
-                detail="Verification code expired.",
-            )
-
-        if not record.telegram_request_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid verification request.",
-            )
-
-    finally:
-        db.close()
-
-    if not TELEGRAM_GATEWAY_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="Telegram verification is not configured.",
-        )
-
-    url = (
-        "https://gatewayapi.telegram.org/"
-        "checkVerificationStatus"
+    phone = normalize_phone(
+        data.phone
     )
 
-    headers = {
-        "Authorization": (
-            f"Bearer {TELEGRAM_GATEWAY_TOKEN}"
-        ),
-        "Content-Type": "application/json",
-    }
-
-    body = {
-        "request_id": record.telegram_request_id,
-        "code": otp,
-    }
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            url,
-            headers=headers,
-            json=body,
+    otp = (
+        db.query(Otp)
+        .filter(
+            Otp.phone == phone,
+            Otp.used == False,
         )
-
-    result = response.json()
-
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=400,
-            detail=result.get(
-                "error",
-                "Verification failed.",
-            ),
+        .order_by(
+            Otp.id.desc()
         )
-
-    verification = (
-        result.get("result", {})
-        .get("verification_status", {})
+        .first()
     )
 
-    if verification.get("status") != "code_valid":
+    if (
+        not otp
+        or otp.expires_at < now()
+    ):
+
         raise HTTPException(
-            status_code=400,
-            detail="Invalid verification code.",
+            400,
+            "OTP expired or not found",
         )
 
-    db = SessionLocal()
+    if otp.attempts >= 5:
 
-    try:
-        record = db.get(
-            OtpRequest,
-            record.id,
+        raise HTTPException(
+            429,
+            "Too many OTP attempts",
         )
 
-        if not record or record.used:
-            raise HTTPException(
-                status_code=400,
-                detail="Verification request already used.",
-            )
+    otp.attempts += 1
 
-        record.used = True
-
-        user = (
-            db.query(User)
-            .filter(User.phone == phone)
-            .first()
-        )
-
-        # One phone number = one account.
-        if not user:
-            user = User(
-                id=secrets.token_hex(16),
-                phone=phone,
-                balance=0.0,
-                kyc_status="Pending",
-            )
-
-            db.add(user)
-            db.flush()
-
-        token = create_token(user.id)
+    if not verify_otp_hash(
+        data.code,
+        otp.code_hash,
+    ):
 
         db.commit()
 
-        return user_json(
-            user,
-            token,
+        raise HTTPException(
+            400,
+            "Invalid OTP",
         )
 
-    finally:
-        db.close()
+    otp.used = True
+
+    user = (
+        db.query(User)
+        .filter(
+            User.phone == phone
+        )
+        .first()
+    )
+
+    if not user:
+
+        user = User(
+            phone=phone
+        )
+
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    db.commit()
+
+    return {
+        "token": token_for(user),
+        "user": serialize_user(user),
+    }
 
 
 # ============================================================
@@ -685,172 +719,103 @@ async def verify_otp(data: PhoneOtpVerify):
 # ============================================================
 
 @app.post("/auth/google")
-async def google_login(data: GoogleLoginRequest):
+def google_login(
+    data: GoogleRequest,
+    db: Session = Depends(db_dep),
+):
 
     if not GOOGLE_CLIENT_ID:
+
         raise HTTPException(
-            status_code=503,
-            detail="Google authentication is not configured.",
+            503,
+            "Google authentication is not configured",
         )
 
     try:
+
+        from google.oauth2 import id_token
+        from google.auth.transport import requests
+
         info = id_token.verify_oauth2_token(
             data.id_token,
-            google_requests.Request(),
+            requests.Request(),
             GOOGLE_CLIENT_ID,
         )
 
     except Exception:
+
         raise HTTPException(
-            status_code=401,
-            detail="Invalid Google authentication.",
+            401,
+            "Invalid Google ID token",
         )
 
-    email = info.get("email")
+    sub = info.get(
+        "sub"
+    )
 
-    if not email:
+    if not sub:
+
         raise HTTPException(
-            status_code=400,
-            detail="Google account email is unavailable.",
+            401,
+            "Google account ID missing",
         )
 
-    db = SessionLocal()
+    user = (
+        db.query(User)
+        .filter(
+            User.google_sub == sub
+        )
+        .first()
+    )
 
-    try:
-        user = (
-            db.query(User)
-            .filter(User.email == email)
-            .first()
+    if not user:
+
+        user = User(
+            google_sub=sub
         )
 
-        if not user:
-            user = User(
-                id=secrets.token_hex(16),
-                email=email,
-                balance=0.0,
-                kyc_status="Pending",
-            )
-
-            db.add(user)
-            db.flush()
-
-        token = create_token(user.id)
-
+        db.add(user)
         db.commit()
+        db.refresh(user)
 
-        return user_json(
-            user,
-            token,
-        )
-
-    finally:
-        db.close()
+    return {
+        "token": token_for(user),
+        "user": serialize_user(user),
+    }
 
 
 # ============================================================
-# TELEGRAM LOGIN
+# TELEGRAM
 # ============================================================
 
 @app.post("/auth/telegram")
-async def telegram_login(
-    data: TelegramLoginRequest,
+def telegram_login(
+    data: TelegramRequest,
+    db: Session = Depends(db_dep),
 ):
-    # Telegram Gateway verification is the primary
-    # phone-verification route.
-    #
-    # A full Telegram Login Widget / OAuth flow should
-    # verify Telegram's signed authentication payload
-    # before accepting telegram_data.
-    #
-    # Do NOT trust arbitrary client-supplied telegram IDs.
+
+    normalize_phone(
+        data.phone
+    )
 
     raise HTTPException(
-        status_code=501,
-        detail=(
-            "Use Telegram phone verification first. "
-            "Telegram Login Widget verification must be "
-            "configured before this endpoint is enabled."
-        ),
+        501,
+        "Use Telegram Gateway OTP verification",
     )
 
 
 # ============================================================
-# CURRENT USER
+# USER
 # ============================================================
 
 @app.get("/me")
 def me(
-    authorization: str | None = Header(default=None),
+    user: User = Depends(current_user),
 ):
-    user = get_user_from_token(
-        authorization
+
+    return serialize_user(
+        user
     )
-
-    return user_json(user)
-
-
-# ============================================================
-# KYC
-# ============================================================
-
-@app.post("/kyc/payment")
-def create_kyc_payment(
-    authorization: str | None = Header(default=None),
-):
-    user = get_user_from_token(
-        authorization
-    )
-
-    db = SessionLocal()
-
-    try:
-        existing = (
-            db.query(KycPayment)
-            .filter(
-                KycPayment.user_id == user.id,
-                KycPayment.status == "Pending",
-            )
-            .first()
-        )
-
-        if existing:
-            payment_id = existing.id
-        else:
-            payment_id = secrets.token_hex(16)
-
-            payment = KycPayment(
-                id=payment_id,
-                user_id=user.id,
-                amount=KYC_USDT,
-                status="Pending",
-            )
-
-            db.add(payment)
-            db.commit()
-
-        return {
-            "payment_id": payment_id,
-            "amount_usdt": KYC_USDT,
-            "network": "TRC20 (TRON)",
-            "deposit_address": USDT_DEPOSIT_ADDRESS,
-            "status": "Pending",
-        }
-
-    finally:
-        db.close()
-
-
-@app.get("/kyc/status")
-def kyc_status(
-    authorization: str | None = Header(default=None),
-):
-    user = get_user_from_token(
-        authorization
-    )
-
-    return {
-        "status": user.kyc_status,
-    }
 
 
 # ============================================================
@@ -859,253 +824,175 @@ def kyc_status(
 
 @app.post("/purchases/create")
 def create_purchase(
-    authorization: str | None = Header(default=None),
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
 ):
-    user = get_user_from_token(
-        authorization
+
+    address = require_deposit_address()
+
+    purchase = Purchase(
+        user_id=user.id,
+        amount_usdt=PACKAGE_USDT,
+        amount_asc=PACKAGE_ASC,
+        deposit_address=address,
     )
 
-    if user.kyc_status.lower() != "verified":
-        raise HTTPException(
-            status_code=403,
-            detail="KYC verification is required before purchase.",
-        )
+    db.add(purchase)
+    db.commit()
+    db.refresh(purchase)
 
-    db = SessionLocal()
-
-    try:
-        purchase = Purchase(
-            id=secrets.token_hex(16),
-            user_id=user.id,
-            usdt=PACKAGE_USDT,
-            asc=PACKAGE_ASC,
-            status="Pending",
-        )
-
-        db.add(purchase)
-        db.commit()
-
-        return {
-            "id": purchase.id,
-            "usdt": PACKAGE_USDT,
-            "asc": PACKAGE_ASC,
-            "status": "Pending",
-            "network": "TRC20 (TRON)",
-            "deposit_address": USDT_DEPOSIT_ADDRESS,
-        }
-
-    finally:
-        db.close()
-
-
-# ============================================================
-# TRON / USDT VERIFICATION
-# ============================================================
-
-async def get_usdt_transfers():
-    url = (
-        f"{TRONGRID_URL}/v1/accounts/"
-        f"{USDT_DEPOSIT_ADDRESS}/transactions/trc20"
-    )
-
-    headers = {}
-
-    if TRONGRID_API_KEY:
-        headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
-
-    params = {
-        "only_confirmed": "true",
-        "limit": "200",
-        "contract_address": USDT_CONTRACT,
+    return {
+        "id": purchase.id,
+        "amount_usdt": purchase.amount_usdt,
+        "amount_asc": purchase.amount_asc,
+        "network": "TRC20",
+        "address": address,
+        "status": purchase.status,
     }
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
-            url,
-            headers=headers,
-            params=params,
-        )
-
-    if response.status_code != 200:
-        return []
-
-    data = response.json()
-
-    return data.get("data", [])
-
-
-async def verify_purchase_on_chain(
-    purchase: Purchase,
-):
-    transfers = await get_usdt_transfers()
-
-    for tx in transfers:
-        tx_hash = (
-            tx.get("transaction_id")
-            or tx.get("transactionId")
-        )
-
-        if not tx_hash:
-            continue
-
-        to_address = tx.get("to")
-
-        if to_address != USDT_DEPOSIT_ADDRESS:
-            continue
-
-        token = tx.get("token_info", {})
-        contract = token.get("address")
-
-        if contract != USDT_CONTRACT:
-            continue
-
-        decimals = int(
-            token.get("decimals", 6)
-        )
-
-        raw_value = tx.get("value", "0")
-
-        try:
-            amount = (
-                float(raw_value)
-                / (10 ** decimals)
-            )
-        except Exception:
-            continue
-
-        if amount < purchase.usdt:
-            continue
-
-        return tx_hash
-
-    return None
 
 
 @app.get("/purchases/{purchase_id}")
-async def purchase_status(
-    purchase_id: str,
-    authorization: str | None = Header(default=None),
+def purchase_status(
+    purchase_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
 ):
-    user = get_user_from_token(
-        authorization
+
+    purchase = db.get(
+        Purchase,
+        purchase_id,
     )
 
-    db = SessionLocal()
+    if (
+        not purchase
+        or purchase.user_id != user.id
+    ):
 
-    try:
-        purchase = db.get(
-            Purchase,
-            purchase_id,
+        raise HTTPException(
+            404,
+            "Purchase not found",
         )
 
-        if not purchase:
-            raise HTTPException(
-                status_code=404,
-                detail="Purchase not found.",
-            )
+    verify_purchase_on_chain(
+        purchase,
+        db,
+    )
 
-        if purchase.user_id != user.id:
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied.",
-            )
-
-        if purchase.status == "Pending":
-
-            tx_hash = await verify_purchase_on_chain(
-                purchase
-            )
-
-            if tx_hash:
-
-                # Unique transaction hash prevents
-                # double-crediting the same blockchain
-                # payment.
-                already_used = (
-                    db.query(Purchase)
-                    .filter(
-                        Purchase.tx_hash == tx_hash
-                    )
-                    .first()
-                )
-
-                if not already_used:
-
-                    purchase.tx_hash = tx_hash
-                    purchase.status = "Confirmed"
-                    purchase.verified_at = now()
-
-                    user.balance += purchase.asc
-
-                    transaction = Transaction(
-                        id=secrets.token_hex(16),
-                        user_id=user.id,
-                        tx_type="Purchase",
-                        amount=purchase.asc,
-                        address=USDT_DEPOSIT_ADDRESS,
-                        status="Confirmed",
-                        tx_hash=tx_hash,
-                    )
-
-                    db.add(transaction)
-                    db.commit()
-
-        return {
-            "id": purchase.id,
-            "usdt": purchase.usdt,
-            "asc": purchase.asc,
-            "status": purchase.status,
-            "tx_hash": purchase.tx_hash,
-            "created_at": purchase.created_at.isoformat(),
-        }
-
-    finally:
-        db.close()
+    return {
+        "id": purchase.id,
+        "amount_usdt": purchase.amount_usdt,
+        "amount_asc": purchase.amount_asc,
+        "status": purchase.status,
+        "txid": purchase.txid,
+    }
 
 
 # ============================================================
-# TRANSACTIONS
+# KYC
+# ============================================================
+
+@app.post("/kyc/payment")
+def create_kyc_payment(
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+
+    address = require_deposit_address()
+
+    if user.kyc_status == "verified":
+
+        raise HTTPException(
+            400,
+            "KYC is already verified",
+        )
+
+    payment = KycPayment(
+        user_id=user.id,
+        amount_usdt=KYC_FEE_USDT,
+        deposit_address=address,
+    )
+
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+
+    return {
+        "id": payment.id,
+        "amount_usdt": KYC_FEE_USDT,
+        "network": "TRC20",
+        "address": address,
+        "status": payment.status,
+    }
+
+
+@app.get("/kyc/status")
+def kyc_status(
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
+):
+
+    payment = (
+        db.query(KycPayment)
+        .filter(
+            KycPayment.user_id == user.id
+        )
+        .order_by(
+            KycPayment.id.desc()
+        )
+        .first()
+    )
+
+    if payment:
+
+        verify_kyc_on_chain(
+            payment,
+            db,
+        )
+
+    db.refresh(user)
+
+    return {
+        "status": user.kyc_status,
+        "payment_status":
+            payment.status
+            if payment
+            else None,
+    }
+
+
+# ============================================================
+# TRANSACTION HISTORY
 # ============================================================
 
 @app.get("/transactions")
 def transactions(
-    authorization: str | None = Header(default=None),
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
 ):
-    user = get_user_from_token(
-        authorization
+
+    rows = (
+        db.query(Ledger)
+        .filter(
+            Ledger.user_id == user.id
+        )
+        .order_by(
+            Ledger.id.desc()
+        )
+        .limit(100)
+        .all()
     )
 
-    db = SessionLocal()
-
-    try:
-        rows = (
-            db.query(Transaction)
-            .filter(
-                Transaction.user_id == user.id
-            )
-            .order_by(
-                Transaction.created_at.desc()
-            )
-            .all()
-        )
-
-        return {
-            "transactions": [
-                {
-                    "id": x.id,
-                    "type": x.tx_type,
-                    "amount": x.amount,
-                    "address": x.address,
-                    "status": x.status,
-                    "tx_hash": x.tx_hash,
-                    "created_at": x.created_at.isoformat(),
-                }
-                for x in rows
-            ]
+    return [
+        {
+            "kind": row.kind,
+            "amount": row.amount,
+            "reference": row.reference,
+            "note": row.note,
+            "created_at":
+                row.created_at.isoformat(),
         }
-
-    finally:
-        db.close()
+        for row in rows
+    ]
 
 
 # ============================================================
@@ -1113,58 +1000,269 @@ def transactions(
 # ============================================================
 
 @app.post("/wallet/send")
-def send_asc(
-    data: SendAscRequest,
-    authorization: str | None = Header(default=None),
+def wallet_send(
+    data: SendRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(db_dep),
 ):
-    user = get_user_from_token(
-        authorization
+
+    if user.balance < data.amount:
+
+        raise HTTPException(
+            400,
+            "Insufficient ASC balance",
+        )
+
+    raise HTTPException(
+        503,
+        "ASC blockchain transfer is not configured. No balance was deducted.",
     )
 
-    if data.amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid ASC amount.",
-        )
 
-    if not data.address.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Recipient address is required.",
-        )
+# ============================================================
+# TRON
+# ============================================================
 
-    db = SessionLocal()
+def tron_trc20_transfers(
+    address: str
+):
+
+    url = (
+        "https://api.trongrid.io/v1/accounts/"
+        f"{address}/transactions/trc20"
+    )
+
+    params = {
+        "only_confirmed": "true",
+        "limit": 200,
+        "contract_address":
+            TRON_USDT_CONTRACT,
+    }
+
+    headers = {}
+
+    if TRON_API_KEY:
+
+        headers[
+            "TRON-PRO-API-KEY"
+        ] = TRON_API_KEY
 
     try:
-        user = db.get(User, user.id)
 
-        if user.balance < data.amount:
-            raise HTTPException(
-                status_code=400,
-                detail="Insufficient ASC balance.",
+        with httpx.Client(
+            timeout=20
+        ) as client:
+
+            response = client.get(
+                url,
+                params=params,
+                headers=headers,
             )
 
-        # IMPORTANT:
-        # Internal ledger transfer is intentionally not
-        # treated as a blockchain transfer.
-        #
-        # Real on-chain ASC transfer requires:
-        # 1. deployed ASC token contract
-        # 2. controlled signing wallet
-        # 3. private key stored only as server secret
-        # 4. TRON transaction signing/broadcasting
-        #
-        # Until those are configured, do NOT deduct the
-        # user's balance pretending a blockchain transfer
-        # happened.
+            response.raise_for_status()
 
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "ASC blockchain transfer is not configured yet. "
-                "No balance was deducted."
-            ),
+            return response.json().get(
+                "data",
+                [],
+            )
+
+    except httpx.HTTPError:
+
+        return []
+
+
+def transfer_amount_usdt(
+    tx: dict
+) -> float:
+
+    value = float(
+        tx.get(
+            "value",
+            0,
+        )
+    )
+
+    decimals = int(
+        tx.get(
+            "token_info",
+            {}
+        ).get(
+            "decimals",
+            6,
+        )
+    )
+
+    return value / (
+        10 ** decimals
+    )
+
+
+# ============================================================
+# PURCHASE VERIFICATION
+# ============================================================
+
+def verify_purchase_on_chain(
+    purchase: Purchase,
+    db: Session,
+):
+
+    if purchase.status == "confirmed":
+        return
+
+    if not USDT_TRON_ADDRESS:
+        return
+
+    transfers = tron_trc20_transfers(
+        USDT_TRON_ADDRESS
+    )
+
+    for tx in transfers:
+
+        txid = tx.get(
+            "transaction_id"
         )
 
-    finally:
-        db.close()
+        to_addr = tx.get(
+            "to"
+        )
+
+        amount = transfer_amount_usdt(
+            tx
+        )
+
+        if not txid:
+            continue
+
+        if to_addr != USDT_TRON_ADDRESS:
+            continue
+
+        if amount < purchase.amount_usdt:
+            continue
+
+        existing = (
+            db.query(Purchase)
+            .filter(
+                Purchase.txid == txid
+            )
+            .first()
+        )
+
+        if existing:
+            continue
+
+        purchase.status = "confirmed"
+
+        purchase.txid = txid
+
+        purchase.confirmed_at = now()
+
+        reference = (
+            f"purchase:{purchase.id}"
+        )
+
+        already_credited = (
+            db.query(Ledger)
+            .filter(
+                Ledger.reference == reference
+            )
+            .first()
+        )
+
+        if not already_credited:
+
+            user = db.get(
+                User,
+                purchase.user_id,
+            )
+
+            user.balance += (
+                purchase.amount_asc
+            )
+
+            db.add(
+                Ledger(
+                    user_id=user.id,
+                    kind="purchase_credit",
+                    amount=purchase.amount_asc,
+                    reference=reference,
+                    note=(
+                        "Confirmed USDT payment "
+                        f"{txid}"
+                    ),
+                )
+            )
+
+        db.commit()
+
+        return
+
+
+# ============================================================
+# KYC VERIFICATION
+# ============================================================
+
+def verify_kyc_on_chain(
+    payment: KycPayment,
+    db: Session,
+):
+
+    if payment.status == "confirmed":
+        return
+
+    if not USDT_TRON_ADDRESS:
+        return
+
+    transfers = tron_trc20_transfers(
+        USDT_TRON_ADDRESS
+    )
+
+    for tx in transfers:
+
+        txid = tx.get(
+            "transaction_id"
+        )
+
+        to_addr = tx.get(
+            "to"
+        )
+
+        amount = transfer_amount_usdt(
+            tx
+        )
+
+        if not txid:
+            continue
+
+        if to_addr != USDT_TRON_ADDRESS:
+            continue
+
+        if amount < payment.amount_usdt:
+            continue
+
+        existing = (
+            db.query(KycPayment)
+            .filter(
+                KycPayment.txid == txid
+            )
+            .first()
+        )
+
+        if existing:
+            continue
+
+        payment.status = "confirmed"
+
+        payment.txid = txid
+
+        payment.confirmed_at = now()
+
+        user = db.get(
+            User,
+            payment.user_id,
+        )
+
+        user.kyc_status = "verified"
+
+        db.commit()
+
+        return
