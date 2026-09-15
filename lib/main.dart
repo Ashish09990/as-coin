@@ -2,591 +2,1047 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const ASCoinApp());
 }
 
-/* ============================================================
-   CONFIG
-============================================================ */
+// ============================================================
+// AS COIN CONFIGURATION
+// ============================================================
 
-class ASCConfig {
+class ASConfig {
+  // IMPORTANT:
+  // Replace this with your deployed HTTPS backend URL.
+  // Example: https://api.example.com
+  static const String backendUrl = '';
+
   static const String appName = 'AS COIN';
   static const String symbol = 'ASC';
 
-  static const double dailyReward = 0.14;
-  static const int miningEndYear = 2130;
-  static const int migrationDays = 365;
+  static const int maxSupply = 21000000;
+
+  // Initial sale example:
+  // 50 USDT = 5,000 ASC
+  static const double packageUsdt = 50.0;
+  static const double packageAsc = 5000.0;
+
   static const double kycFeeUsdt = 1.0;
-  static const int maxSupply = 20000000;
+
+  static const String usdtNetwork = 'TRC20 (TRON)';
 
   // IMPORTANT:
-  // Apne deployed HTTPS backend ka URL yahan lagana hai.
-  // Example:
-  // https://api.yourdomain.com
-  static const String apiBaseUrl = '';
+  // Use only an address controlled by your production payment system.
+  static const String usdtDepositAddress =
+      'TYskeHD53kcs9ksb5ymBGubtJAJpQPkND2';
 
-  static const Duration timeout = Duration(seconds: 20);
+  static const int verificationSeconds = 300;
 }
 
-/* ============================================================
-   API ERROR
-============================================================ */
+// ============================================================
+// MODELS
+// ============================================================
 
-class ApiException implements Exception {
+class UserSession {
+  final String token;
+  final String userId;
+  final String? phone;
+  final String? email;
+  final String? telegramId;
+  final double balance;
+  final String kycStatus;
+  final String? walletAddress;
+
+  UserSession({
+    required this.token,
+    required this.userId,
+    this.phone,
+    this.email,
+    this.telegramId,
+    required this.balance,
+    required this.kycStatus,
+    this.walletAddress,
+  });
+
+  factory UserSession.fromJson(Map<String, dynamic> j) {
+    return UserSession(
+      token: j['token']?.toString() ?? '',
+      userId: j['user_id']?.toString() ?? '',
+      phone: j['phone']?.toString(),
+      email: j['email']?.toString(),
+      telegramId: j['telegram_id']?.toString(),
+      balance: double.tryParse('${j['balance'] ?? 0}') ?? 0,
+      kycStatus: j['kyc_status']?.toString() ?? 'Pending',
+      walletAddress: j['wallet_address']?.toString(),
+    );
+  }
+}
+
+class Purchase {
+  final String id;
+  final double usdt;
+  final double asc;
+  final String status;
+  final String? txHash;
+  final DateTime? createdAt;
+
+  Purchase({
+    required this.id,
+    required this.usdt,
+    required this.asc,
+    required this.status,
+    this.txHash,
+    this.createdAt,
+  });
+
+  factory Purchase.fromJson(Map<String, dynamic> j) {
+    return Purchase(
+      id: j['id']?.toString() ?? '',
+      usdt: double.tryParse('${j['usdt'] ?? 0}') ?? 0,
+      asc: double.tryParse('${j['asc'] ?? 0}') ?? 0,
+      status: j['status']?.toString() ?? 'Pending',
+      txHash: j['tx_hash']?.toString(),
+      createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+    );
+  }
+}
+
+class ASCTx {
+  final String id;
+  final String type;
+  final double amount;
+  final String address;
+  final String status;
+  final String? txHash;
+  final DateTime? createdAt;
+
+  ASCTx({
+    required this.id,
+    required this.type,
+    required this.amount,
+    required this.address,
+    required this.status,
+    this.txHash,
+    this.createdAt,
+  });
+
+  factory ASCTx.fromJson(Map<String, dynamic> j) {
+    return ASCTx(
+      id: j['id']?.toString() ?? '',
+      type: j['type']?.toString() ?? 'Transaction',
+      amount: double.tryParse('${j['amount'] ?? 0}') ?? 0,
+      address: j['address']?.toString() ?? '',
+      status: j['status']?.toString() ?? 'Pending',
+      txHash: j['tx_hash']?.toString(),
+      createdAt: DateTime.tryParse(j['created_at']?.toString() ?? ''),
+    );
+  }
+}
+
+// ============================================================
+// API
+// ============================================================
+
+class APIException implements Exception {
   final String message;
-  final int? statusCode;
 
-  const ApiException(this.message, [this.statusCode]);
+  APIException(this.message);
 
   @override
   String toString() => message;
 }
 
-/* ============================================================
-   SESSION
-============================================================ */
+class ASApi {
+  static String get base => ASConfig.backendUrl.trim();
 
-class ASCSession {
-  final String token;
-  final String accountId;
-  final String phone;
-  final String walletAddress;
+  static bool get configured => base.isNotEmpty;
 
-  final double balance;
-
-  final bool kycVerified;
-  final bool miningActive;
-  final bool migrated;
-
-  final DateTime? miningStarted;
-  final DateTime? lastClaim;
-  final DateTime? accountCreated;
-
-  const ASCSession({
-    required this.token,
-    required this.accountId,
-    required this.phone,
-    required this.walletAddress,
-    required this.balance,
-    required this.kycVerified,
-    required this.miningActive,
-    required this.migrated,
-    required this.miningStarted,
-    required this.lastClaim,
-    required this.accountCreated,
-  });
-
-  factory ASCSession.fromJson(Map<String, dynamic> json) {
-    DateTime? parseDate(dynamic value) {
-      if (value == null) return null;
-      return DateTime.tryParse(value.toString());
-    }
-
-    return ASCSession(
-      token: json['token']?.toString() ?? '',
-      accountId:
-          json['account_id']?.toString() ??
-          json['user_id']?.toString() ??
-          '',
-      phone: json['phone']?.toString() ?? '',
-      walletAddress:
-          json['wallet_address']?.toString() ?? '',
-      balance:
-          (json['balance'] as num?)?.toDouble() ?? 0,
-      kycVerified:
-          json['kyc_verified'] == true ||
-          json['kyc_status']?.toString().toUpperCase() ==
-              'VERIFIED',
-      miningActive:
-          json['mining_active'] == true,
-      migrated:
-          json['migrated'] == true,
-      miningStarted:
-          parseDate(json['mining_started']),
-      lastClaim:
-          parseDate(json['last_claim']),
-      accountCreated:
-          parseDate(json['account_created']),
-    );
-  }
-}
-
-/* ============================================================
-   TRANSACTION
-============================================================ */
-
-class ASCTransaction {
-  final String id;
-  final String type;
-  final double amount;
-  final String sender;
-  final String recipient;
-  final String status;
-  final String txHash;
-  final DateTime? date;
-
-  const ASCTransaction({
-    required this.id,
-    required this.type,
-    required this.amount,
-    required this.sender,
-    required this.recipient,
-    required this.status,
-    required this.txHash,
-    required this.date,
-  });
-
-  factory ASCTransaction.fromJson(
-    Map<String, dynamic> json,
-  ) {
-    return ASCTransaction(
-      id: json['id']?.toString() ?? '',
-      type: json['type']?.toString() ?? 'TRANSFER',
-      amount:
-          (json['amount'] as num?)?.toDouble() ?? 0,
-      sender:
-          json['sender']?.toString() ?? '',
-      recipient:
-          json['recipient']?.toString() ?? '',
-      status:
-          json['status']?.toString() ?? 'UNKNOWN',
-      txHash:
-          json['tx_hash']?.toString() ?? '',
-      date: DateTime.tryParse(
-        json['date']?.toString() ??
-            json['created_at']?.toString() ??
-            '',
-      ),
-    );
-  }
-}
-
-/* ============================================================
-   SESSION STORE
-============================================================ */
-
-class ASCStore {
-  static String? token;
-  static String? phone;
-
-  static Future<void> save(
-    String newToken,
-    String newPhone,
-  ) async {
-    token = newToken;
-    phone = newPhone;
-  }
-
-  static Future<void> clear() async {
-    token = null;
-    phone = null;
-  }
-}
-
-/* ============================================================
-   API CLIENT
-============================================================ */
-
-class ASCApi {
-  static String get baseUrl {
-    final value =
-        ASCConfig.apiBaseUrl.trim();
-
-    if (value.endsWith('/')) {
-      return value.substring(
-        0,
-        value.length - 1,
-      );
-    }
-
-    return value;
-  }
-
-  static bool get configured {
-    return baseUrl.startsWith('https://');
-  }
-
-  static Future<Map<String, dynamic>> request(
+  static Future<Map<String, dynamic>> _request(
     String method,
     String path, {
+    String? token,
     Map<String, dynamic>? body,
-    bool auth = true,
   }) async {
     if (!configured) {
-      throw const ApiException(
-        'Backend URL configure nahi hai.',
-      );
+      throw APIException('Backend connection is not configured.');
     }
+
+    final uri = Uri.parse('$base$path');
 
     final headers = <String, String>{
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
 
-    if (auth && ASCStore.token != null) {
-      headers['Authorization'] =
-          'Bearer ${ASCStore.token}';
+    if (token != null && token.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $token';
     }
-
-    final uri =
-        Uri.parse('$baseUrl$path');
 
     http.Response response;
 
     try {
       if (method == 'GET') {
-        response = await http
-            .get(
-              uri,
-              headers: headers,
-            )
-            .timeout(
-              ASCConfig.timeout,
-            );
-      } else if (method == 'POST') {
-        response = await http
-            .post(
-              uri,
-              headers: headers,
-              body: jsonEncode(
-                body ?? {},
-              ),
-            )
-            .timeout(
-              ASCConfig.timeout,
-            );
+        response = await http.get(uri, headers: headers);
       } else {
-        throw const ApiException(
-          'Invalid API method.',
+        response = await http.post(
+          uri,
+          headers: headers,
+          body: jsonEncode(body ?? {}),
         );
       }
-    } on TimeoutException {
-      throw const ApiException(
-        'Server timeout. Dobara try karo.',
-      );
-    } catch (e) {
-      if (e is ApiException) {
-        rethrow;
-      }
-
-      throw ApiException(
-        'Network error: $e',
+    } catch (_) {
+      throw APIException(
+        'Unable to connect to the AS COIN server. Please try again.',
       );
     }
 
-    dynamic decoded;
+    Map<String, dynamic> data = {};
 
     try {
-      decoded =
-          response.body.isEmpty
-              ? <String, dynamic>{}
-              : jsonDecode(response.body);
-    } catch (_) {
-      throw ApiException(
-        'Server ne invalid response diya.',
-        response.statusCode,
-      );
-    }
-
-    if (response.statusCode < 200 ||
-        response.statusCode >= 300) {
-      String message =
-          'Request failed.';
-
-      if (decoded is Map) {
-        message =
-            decoded['detail']
-                ?.toString() ??
-            decoded['message']
-                ?.toString() ??
-            message;
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        data = decoded;
       }
+    } catch (_) {}
 
-      throw ApiException(
-        message,
-        response.statusCode,
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw APIException(
+        data['message']?.toString() ??
+            data['detail']?.toString() ??
+            'Server request failed.',
       );
     }
 
-    if (decoded is! Map) {
-      throw const ApiException(
-        'Invalid server response.',
-      );
-    }
-
-    return Map<String, dynamic>.from(
-      decoded,
-    );
+    return data;
   }
 
-  /* ---------------- AUTH ---------------- */
+  // ---------------- AUTH ----------------
 
-  static Future<void> requestOtp(
-    String phone,
-  ) async {
-    await request(
+  static Future<String> requestPhoneOtp(String phone) async {
+    final data = await _request(
       'POST',
       '/auth/request-otp',
-      auth: false,
-      body: {
-        'phone': phone,
-      },
+      body: {'phone': phone},
     );
+
+    return data['message']?.toString() ??
+        'Verification code sent successfully.';
   }
 
-  static Future<ASCSession> verifyOtp(
+  static Future<UserSession> verifyPhoneOtp(
     String phone,
     String otp,
   ) async {
-    final result = await request(
+    final data = await _request(
       'POST',
       '/auth/verify-otp',
-      auth: false,
       body: {
         'phone': phone,
         'otp': otp,
       },
     );
 
-    final session =
-        ASCSession.fromJson(result);
-
-    if (session.token.isEmpty) {
-      throw const ApiException(
-        'Server ne login token nahi diya.',
-      );
-    }
-
-    await ASCStore.save(
-      session.token,
-      session.phone,
-    );
-
-    return session;
+    return UserSession.fromJson(data);
   }
 
-  static Future<ASCSession> me() async {
-    final result =
-        await request(
+  static Future<UserSession> googleLogin(String idToken) async {
+    final data = await _request(
+      'POST',
+      '/auth/google',
+      body: {
+        'id_token': idToken,
+      },
+    );
+
+    return UserSession.fromJson(data);
+  }
+
+  static Future<UserSession> telegramLogin(String telegramData) async {
+    final data = await _request(
+      'POST',
+      '/auth/telegram',
+      body: {
+        'telegram_data': telegramData,
+      },
+    );
+
+    return UserSession.fromJson(data);
+  }
+
+  // ---------------- USER ----------------
+
+  static Future<UserSession> me(String token) async {
+    final data = await _request(
       'GET',
       '/me',
+      token: token,
     );
 
-    return ASCSession.fromJson(result);
-  }
-
-  /* ---------------- MINING ---------------- */
-
-  static Future<ASCSession>
-      startMining() async {
-    final result =
-        await request(
-      'POST',
-      '/mining/start',
+    return UserSession(
+      token: token,
+      userId: data['user_id']?.toString() ?? '',
+      phone: data['phone']?.toString(),
+      email: data['email']?.toString(),
+      telegramId: data['telegram_id']?.toString(),
+      balance: double.tryParse('${data['balance'] ?? 0}') ?? 0,
+      kycStatus: data['kyc_status']?.toString() ?? 'Pending',
+      walletAddress: data['wallet_address']?.toString(),
     );
-
-    return ASCSession.fromJson(result);
   }
 
-  static Future<ASCSession>
-      claimMining() async {
-    final result =
-        await request(
-      'POST',
-      '/mining/claim',
-      body: {
-        'reward':
-            ASCConfig.dailyReward,
-      },
-    );
+  // ---------------- KYC ----------------
 
-    return ASCSession.fromJson(result);
-  }
-
-  /* ---------------- KYC ---------------- */
-
-  static Future<Map<String, dynamic>>
-      createKycPayment() async {
-    return request(
+  static Future<Map<String, dynamic>> createKycPayment(
+    String token,
+  ) async {
+    return _request(
       'POST',
       '/kyc/payment',
+      token: token,
       body: {
-        'amount_usdt':
-            ASCConfig.kycFeeUsdt,
-        'network': 'TRC20',
+        'amount_usdt': ASConfig.kycFeeUsdt,
+        'network': ASConfig.usdtNetwork,
       },
     );
   }
 
-  static Future<ASCSession>
-      kycStatus() async {
-    final result =
-        await request(
+  static Future<Map<String, dynamic>> kycStatus(
+    String token,
+  ) async {
+    return _request(
       'GET',
       '/kyc/status',
+      token: token,
     );
-
-    return ASCSession.fromJson(result);
   }
 
-  static Future<ASCSession>
-      adminKycAuthorization(
-    String oneTimeToken,
+  // ---------------- PURCHASE ----------------
+
+  static Future<Purchase> createPurchase(
+    String token,
   ) async {
-    final result =
-        await request(
+    final data = await _request(
       'POST',
-      '/admin/kyc-authorize',
+      '/purchases/create',
+      token: token,
       body: {
-        'one_time_token':
-            oneTimeToken,
+        'amount_usdt': ASConfig.packageUsdt,
+        'amount_asc': ASConfig.packageAsc,
+        'network': ASConfig.usdtNetwork,
       },
     );
 
-    return ASCSession.fromJson(result);
+    return Purchase.fromJson(data);
   }
 
-  /* ---------------- WALLET ---------------- */
+  static Future<Purchase> purchaseStatus(
+    String token,
+    String purchaseId,
+  ) async {
+    final data = await _request(
+      'GET',
+      '/purchases/$purchaseId',
+      token: token,
+    );
 
-  static Future<Map<String, dynamic>>
-      send(
-    String recipient,
+    return Purchase.fromJson(data);
+  }
+
+  // ---------------- WALLET ----------------
+
+  static Future<List<ASCTx>> transactions(
+    String token,
+  ) async {
+    final data = await _request(
+      'GET',
+      '/transactions',
+      token: token,
+    );
+
+    final list = data['transactions'];
+
+    if (list is! List) {
+      return [];
+    }
+
+    return list
+        .whereType<Map<String, dynamic>>()
+        .map(ASCTx.fromJson)
+        .toList();
+  }
+
+  static Future<Map<String, dynamic>> sendAsc(
+    String token,
+    String address,
     double amount,
   ) async {
-    return request(
+    return _request(
       'POST',
       '/wallet/send',
+      token: token,
       body: {
-        'recipient': recipient,
+        'address': address,
         'amount': amount,
       },
     );
   }
+}
 
-  static Future<List<ASCTransaction>>
-      transactions() async {
-    final result =
-        await request(
-      'GET',
-      '/transactions',
-    );
+// ============================================================
+// LOCAL SESSION
+// ============================================================
 
-    final raw =
-        result['transactions'];
+class SessionStore {
+  static const String key = 'asc_token';
 
-    if (raw is! List) {
-      return [];
-    }
+  static Future<void> save(String token) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(key, token);
+  }
 
-    return raw
-        .whereType<Map>()
-        .map(
-          (item) =>
-              ASCTransaction.fromJson(
-            Map<String, dynamic>.from(
-              item,
-            ),
-          ),
-        )
-        .toList();
+  static Future<String?> read() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getString(key);
+  }
+
+  static Future<void> clear() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(key);
   }
 }
 
-/* ============================================================
-   APP
-============================================================ */
+// ============================================================
+// APP
+// ============================================================
 
 class ASCoinApp extends StatelessWidget {
   const ASCoinApp({super.key});
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
     return MaterialApp(
-      title: ASCConfig.appName,
+      title: ASConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        useMaterial3: true,
         brightness: Brightness.dark,
-        colorSchemeSeed:
-            Colors.indigo,
+        scaffoldBackgroundColor: const Color(0xFF101116),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFFB9BEFF),
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
       ),
-      home: const SplashPage(),
+      home: const StartupPage(),
     );
   }
 }
 
-/* ============================================================
-   SPLASH
-============================================================ */
+// ============================================================
+// STARTUP
+// ============================================================
 
-class SplashPage extends StatefulWidget {
-  const SplashPage({super.key});
+class StartupPage extends StatefulWidget {
+  const StartupPage({super.key});
 
   @override
-  State<SplashPage> createState() =>
-      _SplashPageState();
+  State<StartupPage> createState() => _StartupPageState();
 }
 
-class _SplashPageState
-    extends State<SplashPage> {
+class _StartupPageState extends State<StartupPage> {
   @override
   void initState() {
     super.initState();
+    _load();
+  }
 
-    Future.delayed(
-      const Duration(
-        milliseconds: 700,
-      ),
-      () {
-        if (!mounted) return;
+  Future<void> _load() async {
+    await Future.delayed(const Duration(milliseconds: 700));
 
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) =>
-                const LoginPage(),
-          ),
-        );
-      },
-    );
+    final token = await SessionStore.read();
+
+    if (!mounted) return;
+
+    if (token == null || token.isEmpty || !ASApi.configured) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const LoginPage(),
+        ),
+      );
+      return;
+    }
+
+    try {
+      final session = await ASApi.me(token);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HomePage(session: session),
+        ),
+      );
+    } catch (_) {
+      await SessionStore.clear();
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const LoginPage(),
+        ),
+      );
+    }
   }
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
     return const Scaffold(
       body: Center(
         child: Column(
-          mainAxisSize:
-              MainAxisSize.min,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              Icons
-                  .monetization_on,
-              size: 85,
+              Icons.account_balance_wallet,
+              size: 72,
             ),
-            SizedBox(height: 15),
+            SizedBox(height: 18),
             Text(
               'AS COIN',
               style: TextStyle(
                 fontSize: 30,
-                fontWeight:
-                    FontWeight.bold,
+                fontWeight: FontWeight.bold,
               ),
             ),
-            SizedBox(height: 6),
+            SizedBox(height: 8),
             Text(
-              'ASC Network',
+              'Secure ASC Network',
+              style: TextStyle(fontSize: 16),
+            ),
+            SizedBox(height: 25),
+            CircularProgressIndicator(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final phoneController = TextEditingController();
+  final otpController = TextEditingController();
+
+  String countryCode = '+91';
+  bool otpSent = false;
+  bool loading = false;
+
+  @override
+  void dispose() {
+    phoneController.dispose();
+    otpController.dispose();
+    super.dispose();
+  }
+
+  void message(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  Future<void> sendOtp() async {
+    if (!ASApi.configured) {
+      message('Backend connection is not configured.');
+      return;
+    }
+
+    final number = phoneController.text.trim();
+
+    if (number.length < 6) {
+      message('Enter a valid mobile number.');
+      return;
+    }
+
+    setState(() => loading = true);
+
+    try {
+      final fullPhone = '$countryCode$number';
+
+      final result = await ASApi.requestPhoneOtp(fullPhone);
+
+      if (!mounted) return;
+
+      setState(() {
+        otpSent = true;
+        loading = false;
+      });
+
+      message(result);
+    } catch (e) {
+      setState(() => loading = false);
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> verifyOtp() async {
+    final number = phoneController.text.trim();
+    final otp = otpController.text.trim();
+
+    if (otp.length < 4) {
+      message('Enter the verification code.');
+      return;
+    }
+
+    setState(() => loading = true);
+
+    try {
+      final session = await ASApi.verifyPhoneOtp(
+        '$countryCode$number',
+        otp,
+      );
+
+      await SessionStore.save(session.token);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => HomePage(session: session),
+        ),
+      );
+    } catch (e) {
+      setState(() => loading = false);
+      message(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  Future<void> googleLogin() async {
+    message(
+      'Google Sign-In requires the production Google authentication configuration.',
+    );
+  }
+
+  Future<void> telegramLogin() async {
+    message(
+      'Telegram verification requires the production Telegram Gateway configuration.',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: Column(
+                children: [
+                  const SizedBox(height: 25),
+
+                  const CircleAvatar(
+                    radius: 62,
+                    backgroundColor: Colors.white,
+                    child: Icon(
+                      Icons.attach_money,
+                      size: 72,
+                      color: Colors.black,
+                    ),
+                  ),
+
+                  const SizedBox(height: 25),
+
+                  const Text(
+                    'AS COIN',
+                    style: TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  const Text(
+                    'Secure ASC Network',
+                    style: TextStyle(
+                      fontSize: 17,
+                      color: Colors.white70,
+                    ),
+                  ),
+
+                  const SizedBox(height: 40),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: loading ? null : googleLogin,
+                      icon: const Icon(Icons.account_circle),
+                      label: const Text('Continue with Google'),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: loading ? null : telegramLogin,
+                      icon: const Icon(Icons.send),
+                      label: const Text('Continue with Telegram'),
+                    ),
+                  ),
+
+                  const SizedBox(height: 25),
+
+                  const Row(
+                    children: [
+                      Expanded(child: Divider()),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: Text('OR'),
+                      ),
+                      Expanded(child: Divider()),
+                    ],
+                  ),
+
+                  const SizedBox(height: 25),
+
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 105,
+                        child: DropdownButtonFormField<String>(
+                          value: countryCode,
+                          decoration: const InputDecoration(
+                            labelText: 'Code',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: const [
+                            DropdownMenuItem(
+                              value: '+91',
+                              child: Text('+91'),
+                            ),
+                            DropdownMenuItem(
+                              value: '+1',
+                              child: Text('+1'),
+                            ),
+                            DropdownMenuItem(
+                              value: '+44',
+                              child: Text('+44'),
+                            ),
+                            DropdownMenuItem(
+                              value: '+61',
+                              child: Text('+61'),
+                            ),
+                            DropdownMenuItem(
+                              value: '+971',
+                              child: Text('+971'),
+                            ),
+                          ],
+                          onChanged: (v) {
+                            if (v != null) {
+                              setState(() => countryCode = v);
+                            }
+                          },
+                        ),
+                      ),
+
+                      const SizedBox(width: 12),
+
+                      Expanded(
+                        child: TextField(
+                          controller: phoneController,
+                          keyboardType: TextInputType.phone,
+                          decoration: const InputDecoration(
+                            labelText: 'Mobile number',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  if (otpSent)
+                    TextField(
+                      controller: otpController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Verification code',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+
+                  if (otpSent) const SizedBox(height: 18),
+
+                  SizedBox(
+                    width: double.infinity,
+                    height: 54,
+                    child: FilledButton(
+                      onPressed: loading
+                          ? null
+                          : (otpSent ? verifyOtp : sendOtp),
+                      child: loading
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : Text(
+                              otpSent
+                                  ? 'VERIFY CODE'
+                                  : 'SEND VERIFICATION CODE',
+                            ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  const Text(
+                    'One verified identity = one AS COIN account.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white60),
+                  ),
+
+                  if (!ASApi.configured) ...[
+                    const SizedBox(height: 30),
+                    const Text(
+                      'Backend connection is not configured.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.orange,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// HOME
+// ============================================================
+
+class HomePage extends StatefulWidget {
+  final UserSession session;
+
+  const HomePage({
+    super.key,
+    required this.session,
+  });
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  late UserSession session;
+
+  @override
+  void initState() {
+    super.initState();
+    session = widget.session;
+  }
+
+  Future<void> refresh() async {
+    try {
+      final updated = await ASApi.me(session.token);
+
+      if (!mounted) return;
+
+      setState(() => session = updated);
+    } catch (e) {
+      showMessage(
+        e.toString().replaceFirst('Exception: ', ''),
+      );
+    }
+  }
+
+  void showMessage(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('AS COIN'),
+        actions: [
+          IconButton(
+            onPressed: refresh,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: refresh,
+        child: ListView(
+          padding: const EdgeInsets.all(18),
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(22),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'ASC Balance',
+                      style: TextStyle(
+                        color: Colors.white60,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${session.balance.toStringAsFixed(2)} ASC',
+                      style: const TextStyle(
+                        fontSize: 34,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _HomeButton(
+                    icon: Icons.shopping_cart,
+                    title: 'Buy ASC',
+                    onTap: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => PurchasePage(
+                            session: session,
+                          ),
+                        ),
+                      );
+                      await refresh();
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _HomeButton(
+                    icon: Icons.account_balance_wallet,
+                    title: 'Wallet',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => WalletPage(
+                            session: session,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 12),
+
+            Row(
+              children: [
+                Expanded(
+                  child: _HomeButton(
+                    icon: Icons.verified_user,
+                    title: 'KYC',
+                    onTap: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => KycPage(
+                            session: session,
+                          ),
+                        ),
+                      );
+                      await refresh();
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _HomeButton(
+                    icon: Icons.history,
+                    title: 'History',
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => HistoryPage(
+                            session: session,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 25),
+
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.security),
+                title: const Text('Account Security'),
+                subtitle: Text(
+                  'KYC: ${session.kycStatus}',
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 12),
+
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.inventory_2),
+                title: const Text('Maximum Supply'),
+                subtitle: Text(
+                  '${ASConfig.maxSupply} ASC',
+                ),
+              ),
             ),
           ],
         ),
@@ -595,345 +1051,37 @@ class _SplashPageState
   }
 }
 
-/* ============================================================
-   LOGIN
-============================================================ */
+class _HomeButton extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final VoidCallback onTap;
 
-class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+  const _HomeButton({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
 
   @override
-  State<LoginPage> createState() =>
-      _LoginPageState();
-}
-
-class _LoginPageState
-    extends State<LoginPage> {
-  final countryController =
-      TextEditingController(
-    text: '+91',
-  );
-
-  final phoneController =
-      TextEditingController();
-
-  final otpController =
-      TextEditingController();
-
-  bool loading = false;
-  bool otpSent = false;
-
-  String getPhone() {
-    String country =
-        countryController.text
-            .replaceAll(
-              RegExp(r'[^0-9+]'),
-              '',
-            );
-
-    String phone =
-        phoneController.text
-            .replaceAll(
-              RegExp(r'[^0-9]'),
-              '',
-            );
-
-    if (country.isEmpty) {
-      country = '+91';
-    }
-
-    if (!country.startsWith('+')) {
-      country = '+$country';
-    }
-
-    final code =
-        country.substring(1);
-
-    if (phone.startsWith(code)) {
-      phone =
-          phone.substring(
-        code.length,
-      );
-    }
-
-    return '$country$phone';
-  }
-
-  Future<void> sendOtp() async {
-    final digits =
-        phoneController.text
-            .replaceAll(
-              RegExp(r'[^0-9]'),
-              '',
-            );
-
-    if (digits.length < 6) {
-      showMessage(
-        'Valid mobile number enter karo.',
-      );
-      return;
-    }
-
-    if (!ASCApi.configured) {
-      showMessage(
-        'Backend URL configure nahi hai.',
-      );
-      return;
-    }
-
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      await ASCApi.requestOtp(
-        getPhone(),
-      );
-
-      if (!mounted) return;
-
-      setState(
-        () => otpSent = true,
-      );
-
-      showMessage(
-        'OTP sent successfully.',
-      );
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  Future<void> verifyOtp() async {
-    final otp =
-        otpController.text.trim();
-
-    if (otp.length < 4) {
-      showMessage(
-        'OTP enter karo.',
-      );
-      return;
-    }
-
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final session =
-          await ASCApi.verifyOtp(
-        getPhone(),
-        otp,
-      );
-
-      if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) =>
-              HomePage(
-            session: session,
+  Widget build(BuildContext context) {
+    return Card(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            vertical: 25,
+            horizontal: 12,
           ),
-        ),
-      );
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  void showMessage(
-    String text,
-  ) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    countryController.dispose();
-    phoneController.dispose();
-    otpController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child:
-              SingleChildScrollView(
-            padding:
-                const EdgeInsets.all(
-              24,
-            ),
-            child: Column(
-              children: [
-                const Icon(
-                  Icons
-                      .monetization_on,
-                  size: 90,
-                ),
-                const SizedBox(
-                  height: 15,
-                ),
-                const Text(
-                  'AS COIN',
-                  style:
-                      TextStyle(
-                    fontSize: 34,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(
-                  height: 6,
-                ),
-                const Text(
-                  'Secure ASC Network',
-                ),
-                const SizedBox(
-                  height: 40,
-                ),
-
-                Row(
-                  children: [
-                    SizedBox(
-                      width: 90,
-                      child:
-                          TextField(
-                        controller:
-                            countryController,
-                        keyboardType:
-                            TextInputType
-                                .phone,
-                        decoration:
-                            const InputDecoration(
-                          labelText:
-                              'Code',
-                          border:
-                              OutlineInputBorder(),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(
-                      width: 10,
-                    ),
-                    Expanded(
-                      child:
-                          TextField(
-                        controller:
-                            phoneController,
-                        keyboardType:
-                            TextInputType
-                                .phone,
-                        decoration:
-                            const InputDecoration(
-                          labelText:
-                              'Mobile number',
-                          border:
-                              OutlineInputBorder(),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(
-                  height: 15,
-                ),
-
-                if (otpSent)
-                  TextField(
-                    controller:
-                        otpController,
-                    keyboardType:
-                        TextInputType
-                            .number,
-                    maxLength: 8,
-                    decoration:
-                        const InputDecoration(
-                      labelText:
-                          'OTP',
-                      border:
-                          OutlineInputBorder(),
-                    ),
-                  ),
-
-                const SizedBox(
-                  height: 10,
-                ),
-
-                SizedBox(
-                  width:
-                      double.infinity,
-                  child:
-                      FilledButton(
-                    onPressed:
-                        loading
-                            ? null
-                            : otpSent
-                                ? verifyOtp
-                                : sendOtp,
-                    child:
-                        Padding(
-                      padding:
-                          const EdgeInsets
-                              .all(
-                        14,
-                      ),
-                      child: Text(
-                        loading
-                            ? 'PLEASE WAIT...'
-                            : otpSent
-                                ? 'VERIFY OTP'
-                                : 'SEND OTP',
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(
-                  height: 15,
-                ),
-
-                const Text(
-                  'One mobile number = one AS COIN account.',
-                  textAlign:
-                      TextAlign.center,
-                  style:
-                      TextStyle(
-                    fontSize: 12,
-                    color:
-                        Colors.grey,
-                  ),
-                ),
-              ],
-            ),
+          child: Column(
+            children: [
+              Icon(icon, size: 34),
+              const SizedBox(height: 10),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         ),
       ),
@@ -941,46 +1089,508 @@ class _LoginPageState
   }
 }
 
-/* ============================================================
-   HOME
-============================================================ */
+// ============================================================
+// PURCHASE
+// ============================================================
 
-class HomePage extends StatefulWidget {
-  final ASCSession session;
+class PurchasePage extends StatefulWidget {
+  final UserSession session;
 
-  const HomePage({
+  const PurchasePage({
     super.key,
     required this.session,
   });
 
   @override
-  State<HomePage> createState() =>
-      _HomePageState();
+  State<PurchasePage> createState() => _PurchasePageState();
 }
 
-class _HomePageState
-    extends State<HomePage> {
-  late ASCSession session;
-
+class _PurchasePageState extends State<PurchasePage> {
+  Purchase? purchase;
   Timer? timer;
+  int secondsLeft = ASConfig.verificationSeconds;
+  bool creating = false;
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  void message(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  Future<void> createPayment() async {
+    setState(() => creating = true);
+
+    try {
+      final p = await ASApi.createPurchase(widget.session.token);
+
+      if (!mounted) return;
+
+      setState(() {
+        purchase = p;
+        creating = false;
+        secondsLeft = ASConfig.verificationSeconds;
+      });
+
+      startVerification();
+    } catch (e) {
+      setState(() => creating = false);
+      message(
+        e.toString().replaceFirst('Exception: ', ''),
+      );
+    }
+  }
+
+  void startVerification() {
+    timer?.cancel();
+
+    timer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) async {
+        if (purchase == null) return;
+
+        if (secondsLeft > 0) {
+          setState(() {
+            secondsLeft -= 10;
+            if (secondsLeft < 0) secondsLeft = 0;
+          });
+        }
+
+        try {
+          final updated = await ASApi.purchaseStatus(
+            widget.session.token,
+            purchase!.id,
+          );
+
+          if (!mounted) return;
+
+          setState(() => purchase = updated);
+
+          if (updated.status.toLowerCase() == 'confirmed' ||
+              updated.status.toLowerCase() == 'completed') {
+            timer?.cancel();
+
+            message(
+              'Payment verified. ASC has been credited.',
+            );
+          }
+        } catch (_) {
+          // Keep checking.
+        }
+      },
+    );
+  }
+
+  String timeText() {
+    final m = secondsLeft ~/ 60;
+    final s = secondsLeft % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = purchase;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Buy ASC'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                children: [
+                  const Text(
+                    'ASC Purchase',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
+                  _info('Payment', '50 USDT'),
+                  _info('ASC Allocation', '5,000 ASC'),
+                  _info('Network', ASConfig.usdtNetwork),
+
+                  const Divider(height: 30),
+
+                  const Text(
+                    'Send exactly 50 USDT using TRC20.',
+                    textAlign: TextAlign.center,
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  QrImageView(
+                    data: ASConfig.usdtDepositAddress,
+                    size: 220,
+                    backgroundColor: Colors.white,
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  const Text(
+                    'Deposit Address',
+                    style: TextStyle(
+                      color: Colors.white60,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  SelectableText(
+                    ASConfig.usdtDepositAddress,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+
+                  const SizedBox(height: 15),
+
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      // Clipboard can be added if desired.
+                      message('Select and copy the address above.');
+                    },
+                    icon: const Icon(Icons.copy),
+                    label: const Text('COPY ADDRESS'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 18),
+
+          if (p == null)
+            SizedBox(
+              height: 55,
+              child: FilledButton(
+                onPressed: creating ? null : createPayment,
+                child: creating
+                    ? const CircularProgressIndicator()
+                    : const Text('I HAVE MADE THE PAYMENT'),
+              ),
+            ),
+
+          if (p != null) ...[
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    const Icon(
+                      Icons.sync,
+                      size: 45,
+                    ),
+                    const SizedBox(height: 12),
+
+                    const Text(
+                      'Payment Verification',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+
+                    const SizedBox(height: 10),
+
+                    Text(
+                      'Status: ${p.status}',
+                      style: const TextStyle(fontSize: 17),
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    if (p.status.toLowerCase() == 'pending')
+                      Text(
+                        'Automatic verification: up to ${timeText()}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                        ),
+                      ),
+
+                    if (p.txHash != null &&
+                        p.txHash!.isNotEmpty) ...[
+                      const SizedBox(height: 15),
+                      const Text(
+                        'Transaction',
+                        style: TextStyle(
+                          color: Colors.white60,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      SelectableText(
+                        p.txHash!,
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+
+                    const SizedBox(height: 20),
+
+                    const Text(
+                      'A payment screenshot may be uploaded for support records, '
+                      'but ASC will only be credited after blockchain verification.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            OutlinedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ScannerPage(
+                      title: 'Scan Payment QR',
+                      onScanned: (value) {
+                        Navigator.pop(context);
+                        message(
+                          'QR detected. Blockchain verification remains required.',
+                        );
+                      },
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('SCAN QR'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _info(String title, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Expanded(child: Text(title)),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// KYC
+// ============================================================
+
+class KycPage extends StatefulWidget {
+  final UserSession session;
+
+  const KycPage({
+    super.key,
+    required this.session,
+  });
+
+  @override
+  State<KycPage> createState() => _KycPageState();
+}
+
+class _KycPageState extends State<KycPage> {
+  String status = 'Pending';
   bool loading = false;
 
   @override
   void initState() {
     super.initState();
+    loadStatus();
+  }
 
-    session =
-        widget.session;
+  void message(String text) {
+    if (!mounted) return;
 
-    timer = Timer.periodic(
-      const Duration(
-        seconds: 1,
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  Future<void> loadStatus() async {
+    try {
+      final data = await ASApi.kycStatus(
+        widget.session.token,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        status = data['status']?.toString() ?? 'Pending';
+      });
+    } catch (_) {}
+  }
+
+  Future<void> payKyc() async {
+    setState(() => loading = true);
+
+    try {
+      final data = await ASApi.createKycPayment(
+        widget.session.token,
+      );
+
+      if (!mounted) return;
+
+      setState(() => loading = false);
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => KycPaymentPage(
+            session: widget.session,
+            paymentData: data,
+          ),
+        ),
+      );
+    } catch (e) {
+      setState(() => loading = false);
+
+      message(
+        e.toString().replaceFirst('Exception: ', ''),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('KYC Verification'),
       ),
-      (_) {
-        if (mounted) {
-          setState(() {});
-        }
-      },
+      body: ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                children: [
+                  const Icon(
+                    Icons.verified_user,
+                    size: 65,
+                  ),
+                  const SizedBox(height: 15),
+                  const Text(
+                    'KYC Status',
+                    style: TextStyle(fontSize: 22),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    status,
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 18),
+
+          if (status.toLowerCase() != 'verified')
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    const Text(
+                      'Standard KYC Fee',
+                      style: TextStyle(fontSize: 17),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      '1 USDT',
+                      style: TextStyle(
+                        fontSize: 30,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'TRC20 (TRON)',
+                      style: TextStyle(
+                        color: Colors.white60,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: FilledButton(
+                        onPressed: loading ? null : payKyc,
+                        child: loading
+                            ? const CircularProgressIndicator()
+                            : const Text('START KYC'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// KYC PAYMENT
+// ============================================================
+
+class KycPaymentPage extends StatefulWidget {
+  final UserSession session;
+  final Map<String, dynamic> paymentData;
+
+  const KycPaymentPage({
+    super.key,
+    required this.session,
+    required this.paymentData,
+  });
+
+  @override
+  State<KycPaymentPage> createState() => _KycPaymentPageState();
+}
+
+class _KycPaymentPageState extends State<KycPaymentPage> {
+  Timer? timer;
+  int seconds = 300;
+  String status = 'Pending';
+
+  @override
+  void initState() {
+    super.initState();
+    timer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => check(),
     );
   }
 
@@ -990,983 +1600,101 @@ class _HomePageState
     super.dispose();
   }
 
-  Duration get remaining {
-    if (session.lastClaim ==
-        null) {
-      return Duration.zero;
-    }
-
-    final next =
-        session.lastClaim!
-            .toUtc()
-            .add(
-              const Duration(
-                hours: 24,
-              ),
-            );
-
-    final now =
-        DateTime.now().toUtc();
-
-    final d =
-        next.difference(now);
-
-    return d.isNegative
-        ? Duration.zero
-        : d;
-  }
-
-  String countdown() {
-    final d = remaining;
-
-    if (d == Duration.zero) {
-      return 'READY';
-    }
-
-    return '${d.inHours.toString().padLeft(2, '0')}:'
-        '${d.inMinutes.remainder(60).toString().padLeft(2, '0')}:'
-        '${d.inSeconds.remainder(60).toString().padLeft(2, '0')}';
-  }
-
-  Future<void> refresh() async {
+  Future<void> check() async {
     try {
-      final updated =
-          await ASCApi.me();
+      final data = await ASApi.kycStatus(
+        widget.session.token,
+      );
 
-      if (mounted) {
-        setState(
-          () => session =
-              updated,
-        );
+      if (!mounted) return;
+
+      setState(() {
+        status = data['status']?.toString() ?? status;
+        seconds -= 10;
+        if (seconds < 0) seconds = 0;
+      });
+
+      if (status.toLowerCase() == 'verified') {
+        timer?.cancel();
       }
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    }
-  }
-
-  Future<void> startMining() async {
-    if (!session.kycVerified) {
-      showMessage(
-        'Pehle KYC complete karo.',
-      );
-      return;
-    }
-
-    if (DateTime.now().year >=
-        ASCConfig.miningEndYear) {
-      showMessage(
-        'Mining period ended.',
-      );
-      return;
-    }
-
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final updated =
-          await ASCApi.startMining();
-
-      if (mounted) {
-        setState(
-          () => session =
-              updated,
-        );
-
-        showMessage(
-          'Mining started.',
-        );
-      }
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  Future<void> claim() async {
-    if (!session.kycVerified) {
-      showMessage(
-        'KYC verification required.',
-      );
-      return;
-    }
-
-    if (!session.miningActive) {
-      showMessage(
-        'Pehle mining start karo.',
-      );
-      return;
-    }
-
-    if (remaining !=
-        Duration.zero) {
-      showMessage(
-        'Next claim: ${countdown()}',
-      );
-      return;
-    }
-
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final updated =
-          await ASCApi.claimMining();
-
-      if (mounted) {
-        setState(
-          () => session =
-              updated,
-        );
-
-        showMessage(
-          '0.14 ASC credited.',
-        );
-      }
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  Future<void> openKyc() async {
-    final updated =
-        await Navigator.push<
-            ASCSession>(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            KycPage(
-          session: session,
-        ),
-      ),
-    );
-
-    if (updated != null &&
-        mounted) {
-      setState(
-        () => session =
-            updated,
-      );
-    }
-  }
-
-  Future<void> openWallet() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            WalletPage(
-          session: session,
-        ),
-      ),
-    );
-
-    await refresh();
-  }
-
-  void showMessage(
-    String text,
-  ) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-      ),
-    );
-  }
-
-  Future<void> logout() async {
-    await ASCStore.clear();
-
-    if (!mounted) return;
-
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            const LoginPage(),
-      ),
-      (_) => false,
-    );
+    } catch (_) {}
   }
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
+    final address =
+        widget.paymentData['deposit_address']?.toString() ??
+            ASConfig.usdtDepositAddress;
+
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text('AS COIN'),
-        actions: [
-          IconButton(
-            onPressed:
-                openWallet,
-            icon: const Icon(
-              Icons
-                  .account_balance_wallet,
-            ),
-          ),
-          IconButton(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) =>
-                      AccountPage(
-                    session:
-                        session,
-                  ),
-                ),
-              );
-            },
-            icon: const Icon(
-              Icons.person,
-            ),
-          ),
-        ],
-      ),
-      body:
-          RefreshIndicator(
-        onRefresh: refresh,
-        child: ListView(
-          padding:
-              const EdgeInsets.all(
-            16,
-          ),
-          children: [
-            Card(
-              child: Padding(
-                padding:
-                    const EdgeInsets.all(
-                  22,
-                ),
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'AS COIN',
-                      style:
-                          TextStyle(
-                        fontSize: 28,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 12,
-                    ),
-                    Text(
-                      '${session.balance.toStringAsFixed(8)} ASC',
-                      style:
-                          const TextStyle(
-                        fontSize: 32,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ),
-                    const Text(
-                      'Maximum reward: 0.14 ASC / 24 hours',
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 12,
-            ),
-
-            Card(
-              child: Padding(
-                padding:
-                    const EdgeInsets.all(
-                  18,
-                ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.bolt,
-                        ),
-                        const SizedBox(
-                          width: 10,
-                        ),
-                        const Expanded(
-                          child: Text(
-                            'Mining',
-                            style:
-                                TextStyle(
-                              fontSize:
-                                  21,
-                              fontWeight:
-                                  FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          session.miningActive
-                              ? 'ACTIVE'
-                              : 'STOPPED',
-                        ),
-                      ],
-                    ),
-                    const SizedBox(
-                      height: 15,
-                    ),
-                    SizedBox(
-                      width:
-                          double.infinity,
-                      child:
-                          FilledButton(
-                        onPressed:
-                            loading ||
-                                    session
-                                        .miningActive
-                                ? null
-                                : startMining,
-                        child: Text(
-                          session.miningActive
-                              ? 'MINING ACTIVE'
-                              : 'START MINING',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ),
-                    SizedBox(
-                      width:
-                          double.infinity,
-                      child:
-                          OutlinedButton(
-                        onPressed:
-                            loading
-                                ? null
-                                : claim,
-                        child: Text(
-                          remaining ==
-                                  Duration
-                                      .zero
-                              ? 'CLAIM 0.14 ASC'
-                              : 'NEXT CLAIM ${countdown()}',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 12,
-            ),
-
-            Card(
-              child: ListTile(
-                leading: Icon(
-                  session.kycVerified
-                      ? Icons.verified
-                      : Icons
-                          .verified_user_outlined,
-                ),
-                title:
-                    const Text(
-                  'KYC',
-                ),
-                subtitle:
-                    Text(
-                  session.kycVerified
-                      ? 'Verified'
-                      : 'Not verified • 1 USDT TRC20',
-                ),
-                trailing:
-                    FilledButton(
-                  onPressed:
-                      session.kycVerified
-                          ? null
-                          : openKyc,
-                  child: Text(
-                    session.kycVerified
-                        ? 'VERIFIED'
-                        : 'KYC',
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 12,
-            ),
-
-            Card(
-              child: Column(
-                children: [
-                  ListTile(
-                    leading:
-                        const Icon(
-                      Icons
-                          .account_balance_wallet,
-                    ),
-                    title:
-                        const Text(
-                      'Wallet',
-                    ),
-                    subtitle:
-                        const Text(
-                      'Send / Receive ASC',
-                    ),
-                    onTap:
-                        openWallet,
-                  ),
-                  ListTile(
-                    leading:
-                        const Icon(
-                      Icons.history,
-                    ),
-                    title:
-                        const Text(
-                      'Transaction History',
-                    ),
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder:
-                              (_) =>
-                                  const HistoryPage(),
-                        ),
-                      );
-                    },
-                  ),
-                  ListTile(
-                    leading:
-                        const Icon(
-                      Icons.logout,
-                    ),
-                    title:
-                        const Text(
-                      'Logout',
-                    ),
-                    onTap:
-                        logout,
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(
-              height: 12,
-            ),
-
-            const Card(
-              child: Padding(
-                padding:
-                    EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    Text(
-                      'AS COIN PROTOCOL',
-                      style:
-                          TextStyle(
-                        fontSize: 19,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                    SizedBox(
-                      height: 10,
-                    ),
-                    Text(
-                      'Maximum Supply: 20,000,000 ASC',
-                    ),
-                    Text(
-                      'Mining Rate: 0.14 ASC / day',
-                    ),
-                    Text(
-                      'Mining End: 2130',
-                    ),
-                    Text(
-                      'KYC: Immediate',
-                    ),
-                    Text(
-                      'Normal KYC: 1 USDT • TRC20',
-                    ),
-                    Text(
-                      'Migration: 365 days',
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/* ============================================================
-   KYC
-============================================================ */
-
-class KycPage extends StatefulWidget {
-  final ASCSession session;
-
-  const KycPage({
-    super.key,
-    required this.session,
-  });
-
-  @override
-  State<KycPage> createState() =>
-      _KycPageState();
-}
-
-class _KycPageState
-    extends State<KycPage> {
-  bool loading = false;
-
-  Future<void> createPayment() async {
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final result =
-          await ASCApi
-              .createKycPayment();
-
-      if (!mounted) return;
-
-      final address =
-          result['payment_address']
-              ?.toString() ??
-          '';
-
-      final amount =
-          result['amount_usdt']
-              ?.toString() ??
-          '1';
-
-      showDialog(
-        context: context,
-        builder: (_) =>
-            AlertDialog(
-          title:
-              const Text(
-            'KYC PAYMENT',
-          ),
-          content:
-              SingleChildScrollView(
-            child: Column(
-              children: [
-                const Text(
-                  'Exactly 1 USDT TRC20 send karo:',
-                  textAlign:
-                      TextAlign.center,
-                ),
-                const SizedBox(
-                  height: 15,
-                ),
-                if (address.isNotEmpty)
-                  Container(
-                    padding:
-                        const EdgeInsets
-                            .all(
-                      12,
-                    ),
-                    color:
-                        Colors.white,
-                    child:
-                        QrImageView(
-                      data:
-                          address,
-                      size: 190,
-                    ),
-                  ),
-                const SizedBox(
-                  height: 15,
-                ),
-                SelectableText(
-                  address,
-                  textAlign:
-                      TextAlign.center,
-                ),
-                const SizedBox(
-                  height: 12,
-                ),
-                Text(
-                  'Amount: $amount USDT',
-                ),
-                const SizedBox(
-                  height: 12,
-                ),
-                const Text(
-                  'KYC tabhi approve hogi jab backend blockchain payment verify karega.',
-                  textAlign:
-                      TextAlign.center,
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.grey,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () =>
-                  Navigator.pop(
-                context,
-              ),
-              child:
-                  const Text(
-                'CLOSE',
-              ),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  Future<void> checkStatus() async {
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final updated =
-          await ASCApi.kycStatus();
-
-      if (!mounted) return;
-
-      if (updated.kycVerified) {
-        Navigator.pop(
-          context,
-          updated,
-        );
-      } else {
-        showMessage(
-          'KYC abhi verified nahi hai.',
-        );
-      }
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  Future<void> ownerAuthorization() async {
-    final controller =
-        TextEditingController();
-
-    final token =
-        await showDialog<String>(
-      context: context,
-      builder: (_) =>
-          AlertDialog(
-        title:
-            const Text(
-          'Owner Authorization',
-        ),
-        content:
-            TextField(
-          controller:
-              controller,
-          obscureText: true,
-          decoration:
-              const InputDecoration(
-            labelText:
-                'One-time token',
-            border:
-                OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(
-              context,
-            ),
-            child:
-                const Text(
-              'CANCEL',
-            ),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(
-              context,
-              controller
-                  .text
-                  .trim(),
-            ),
-            child:
-                const Text(
-              'VERIFY',
-            ),
-          ),
-        ],
-      ),
-    );
-
-    controller.dispose();
-
-    if (token == null ||
-        token.isEmpty) {
-      return;
-    }
-
-    setState(
-      () => loading = true,
-    );
-
-    try {
-      final updated =
-          await ASCApi
-              .adminKycAuthorization(
-        token,
-      );
-
-      if (!mounted) return;
-
-      Navigator.pop(
-        context,
-        updated,
-      );
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => loading = false,
-        );
-      }
-    }
-  }
-
-  void showMessage(
-    String text,
-  ) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-      ),
-    );
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
-    return Scaffold(
-      appBar: AppBar(
-        title:
-            const Text(
-          'KYC VERIFICATION',
-        ),
+        title: const Text('KYC Payment'),
       ),
       body: ListView(
-        padding:
-            const EdgeInsets.all(
-          20,
-        ),
+        padding: const EdgeInsets.all(18),
         children: [
-          const Icon(
-            Icons.verified_user,
-            size: 75,
-          ),
-          const SizedBox(
-            height: 15,
-          ),
-          const Text(
-            'KYC available immediately',
-            textAlign:
-                TextAlign.center,
-            style:
-                TextStyle(
-              fontSize: 23,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-          const SizedBox(
-            height: 8,
-          ),
-          const Text(
-            'Normal KYC fee: 1 USDT • TRC20',
-            textAlign:
-                TextAlign.center,
-          ),
-          const SizedBox(
-            height: 25,
-          ),
-
           Card(
             child: Padding(
-              padding:
-                  const EdgeInsets.all(
-                18,
-              ),
+              padding: const EdgeInsets.all(20),
               child: Column(
                 children: [
                   const Text(
-                    'NORMAL KYC',
-                    style:
-                        TextStyle(
-                      fontSize: 19,
-                      fontWeight:
-                          FontWeight.bold,
+                    'KYC Payment',
+                    style: TextStyle(
+                      fontSize: 25,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(
-                    height: 10,
-                  ),
-                  const Text(
-                    'Payment server blockchain par verify karega. Fake/local KYC approval nahi hoga.',
-                    textAlign:
-                        TextAlign.center,
-                  ),
-                  const SizedBox(
-                    height: 15,
-                  ),
-                  SizedBox(
-                    width:
-                        double.infinity,
-                    child:
-                        FilledButton(
-                      onPressed:
-                          loading
-                              ? null
-                              : createPayment,
-                      child: Text(
-                        loading
-                            ? 'PLEASE WAIT...'
-                            : 'PAY 1 USDT • TRC20',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(
-                    height: 8,
-                  ),
-                  SizedBox(
-                    width:
-                        double.infinity,
-                    child:
-                        OutlinedButton(
-                      onPressed:
-                          loading
-                              ? null
-                              : checkStatus,
-                      child:
-                          const Text(
-                        'CHECK KYC STATUS',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+                  const SizedBox(height: 18),
 
-          const SizedBox(
-            height: 15,
-          ),
-
-          Card(
-            child: Padding(
-              padding:
-                  const EdgeInsets.all(
-                18,
-              ),
-              child: Column(
-                children: [
                   const Text(
-                    'OWNER',
-                    style:
-                        TextStyle(
-                      fontSize: 19,
-                      fontWeight:
-                          FontWeight.bold,
+                    'Amount',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+
+                  const Text(
+                    '1 USDT',
+                    style: TextStyle(
+                      fontSize: 30,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(
-                    height: 10,
+
+                  const SizedBox(height: 8),
+
+                  const Text('TRC20 (TRON)'),
+
+                  const SizedBox(height: 20),
+
+                  QrImageView(
+                    data: address,
+                    size: 220,
+                    backgroundColor: Colors.white,
                   ),
+
+                  const SizedBox(height: 18),
+
+                  SelectableText(
+                    address,
+                    textAlign: TextAlign.center,
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  Text(
+                    'Verification status: $status',
+                    style: const TextStyle(
+                      fontSize: 18,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
                   const Text(
-                    'Owner authorization server-side one-time token se verify hogi.',
-                    textAlign:
-                        TextAlign.center,
-                  ),
-                  const SizedBox(
-                    height: 15,
-                  ),
-                  SizedBox(
-                    width:
-                        double.infinity,
-                    child:
-                        OutlinedButton(
-                      onPressed:
-                          loading
-                              ? null
-                              : ownerAuthorization,
-                      child:
-                          const Text(
-                        'OWNER AUTHORIZATION',
-                      ),
+                    'The system will automatically verify the blockchain payment.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white60,
                     ),
                   ),
                 ],
@@ -1979,12 +1707,12 @@ class _KycPageState
   }
 }
 
-/* ============================================================
-   WALLET
-============================================================ */
+// ============================================================
+// WALLET
+// ============================================================
 
-class WalletPage extends StatefulWidget {
-  final ASCSession session;
+class WalletPage extends StatelessWidget {
+  final UserSession session;
 
   const WalletPage({
     super.key,
@@ -1992,453 +1720,118 @@ class WalletPage extends StatefulWidget {
   });
 
   @override
-  State<WalletPage> createState() =>
-      _WalletPageState();
-}
+  Widget build(BuildContext context) {
+    final address = session.walletAddress;
 
-class _WalletPageState
-    extends State<WalletPage> {
-  late ASCSession session;
-
-  @override
-  void initState() {
-    super.initState();
-    session =
-        widget.session;
-  }
-
-  Future<void> refresh() async {
-    try {
-      final updated =
-          await ASCApi.me();
-
-      if (mounted) {
-        setState(
-          () => session =
-              updated,
-        );
-      }
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    }
-  }
-
-  void copyAddress() {
-    Clipboard.setData(
-      ClipboardData(
-        text:
-            session.walletAddress,
-      ),
-    );
-
-    showMessage(
-      'Wallet address copied.',
-    );
-  }
-
-  Future<void> openReceive() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            ReceivePage(
-          address:
-              session.walletAddress,
-        ),
-      ),
-    );
-  }
-
-  Future<void> openSend() async {
-    if (!session.kycVerified) {
-      showMessage(
-        'KYC verification required.',
-      );
-      return;
-    }
-
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            SendPage(
-          session: session,
-        ),
-      ),
-    );
-
-    await refresh();
-  }
-
-  void showMessage(
-    String text,
-  ) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-      ),
-    );
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text(
-          'ASC WALLET',
-        ),
-      ),
-      body:
-          RefreshIndicator(
-        onRefresh: refresh,
-        child: ListView(
-          padding:
-              const EdgeInsets.all(
-            18,
-          ),
-          children: [
-            Card(
-              child: Padding(
-                padding:
-                    const EdgeInsets.all(
-                  22,
-                ),
-                child: Column(
-                  children: [
-                    const Icon(
-                      Icons
-                          .account_balance_wallet,
-                      size: 60,
-                    ),
-                    const SizedBox(
-                      height: 12,
-                    ),
-                    const Text(
-                      'Balance',
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ),
-                    Text(
-                      '${session.balance.toStringAsFixed(8)} ASC',
-                      style:
-                          const TextStyle(
-                        fontSize: 30,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 15,
-            ),
-
-            Card(
-              child: Padding(
-                padding:
-                    const EdgeInsets.all(
-                  16,
-                ),
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'YOUR ASC ADDRESS',
-                      style:
-                          TextStyle(
-                        fontSize: 18,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 10,
-                    ),
-                    SelectableText(
-                      session
-                          .walletAddress,
-                    ),
-                    const SizedBox(
-                      height: 12,
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child:
-                              OutlinedButton.icon(
-                            onPressed:
-                                copyAddress,
-                            icon:
-                                const Icon(
-                              Icons.copy,
-                            ),
-                            label:
-                                const Text(
-                              'COPY',
-                            ),
-                          ),
-                        ),
-                        const SizedBox(
-                          width: 8,
-                        ),
-                        Expanded(
-                          child:
-                              OutlinedButton.icon(
-                            onPressed:
-                                openReceive,
-                            icon:
-                                const Icon(
-                              Icons.qr_code,
-                            ),
-                            label:
-                                const Text(
-                              'QR',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 12,
-            ),
-
-            SizedBox(
-              width:
-                  double.infinity,
-              child:
-                  FilledButton.icon(
-                onPressed:
-                    openReceive,
-                icon:
-                    const Icon(
-                  Icons.download,
-                ),
-                label:
-                    const Padding(
-                  padding:
-                      EdgeInsets.all(
-                    14,
-                  ),
-                  child:
-                      Text(
-                    'RECEIVE ASC',
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 8,
-            ),
-
-            SizedBox(
-              width:
-                  double.infinity,
-              child:
-                  FilledButton.icon(
-                onPressed:
-                    openSend,
-                icon:
-                    const Icon(
-                  Icons.send,
-                ),
-                label:
-                    const Padding(
-                  padding:
-                      EdgeInsets.all(
-                    14,
-                  ),
-                  child:
-                      Text(
-                    'SEND ASC',
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 15,
-            ),
-
-            Card(
-              child:
-                  ListTile(
-                leading: Icon(
-                  session.kycVerified
-                      ? Icons.verified
-                      : Icons.warning,
-                ),
-                title:
-                    const Text(
-                  'KYC',
-                ),
-                subtitle:
-                    Text(
-                  session.kycVerified
-                      ? 'Verified'
-                      : 'Not verified',
-                ),
-              ),
-            ),
-
-            const SizedBox(
-              height: 10,
-            ),
-
-            Card(
-              child:
-                  ListTile(
-                leading:
-                    const Icon(
-                  Icons.swap_horiz,
-                ),
-                title:
-                    const Text(
-                  'Migration',
-                ),
-                subtitle:
-                    Text(
-                  session.migrated
-                      ? 'Completed'
-                      : 'Available after ${ASCConfig.migrationDays} days',
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/* ============================================================
-   RECEIVE
-============================================================ */
-
-class ReceivePage
-    extends StatelessWidget {
-  final String address;
-
-  const ReceivePage({
-    super.key,
-    required this.address,
-  });
-
-  void copy(
-    BuildContext context,
-  ) {
-    Clipboard.setData(
-      ClipboardData(
-        text: address,
-      ),
-    );
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      const SnackBar(
-        content:
-            Text(
-          'Address copied.',
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
-    return Scaffold(
-      appBar: AppBar(
-        title:
-            const Text(
-          'RECEIVE ASC',
-        ),
+        title: const Text('ASC Wallet'),
       ),
       body: ListView(
-        padding:
-            const EdgeInsets.all(
-          20,
-        ),
+        padding: const EdgeInsets.all(18),
         children: [
-          const Text(
-            'YOUR ASC ADDRESS',
-            textAlign:
-                TextAlign.center,
-            style:
-                TextStyle(
-              fontSize: 22,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-          const SizedBox(
-            height: 20,
-          ),
-          Center(
-            child: Container(
-              padding:
-                  const EdgeInsets.all(
-                18,
-              ),
-              color:
-                  Colors.white,
-              child:
-                  QrImageView(
-                data: address,
-                size: 240,
-              ),
-            ),
-          ),
-          const SizedBox(
-            height: 20,
-          ),
           Card(
             child: Padding(
-              padding:
-                  const EdgeInsets.all(
-                16,
-              ),
-              child:
-                  SelectableText(
-                address,
-                textAlign:
-                    TextAlign.center,
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                children: [
+                  const Icon(
+                    Icons.account_balance_wallet,
+                    size: 65,
+                  ),
+                  const SizedBox(height: 15),
+                  const Text(
+                    'Available Balance',
+                    style: TextStyle(
+                      color: Colors.white60,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '${session.balance.toStringAsFixed(2)} ASC',
+                    style: const TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(
-            height: 12,
-          ),
-          FilledButton.icon(
-            onPressed: () =>
-                copy(context),
-            icon:
-                const Icon(
-              Icons.copy,
+
+          const SizedBox(height: 15),
+
+          Card(
+            child: ListTile(
+              title: const Text('Wallet Address'),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: SelectableText(
+                  address == null || address.isEmpty
+                      ? 'Wallet address will be provided by the backend.'
+                      : address,
+                ),
+              ),
             ),
-            label:
-                const Text(
-              'COPY ADDRESS',
+          ),
+
+          const SizedBox(height: 15),
+
+          Row(
+            children: [
+              Expanded(
+                child: _WalletAction(
+                  icon: Icons.call_received,
+                  title: 'Receive',
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ReceivePage(
+                          session: session,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _WalletAction(
+                  icon: Icons.call_made,
+                  title: 'Send',
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SendPage(
+                          session: session,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 12),
+
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => HistoryPage(
+                      session: session,
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.history),
+              label: const Text('TRANSACTION HISTORY'),
             ),
           ),
         ],
@@ -2447,12 +1840,136 @@ class ReceivePage
   }
 }
 
-/* ============================================================
-   SEND
-============================================================ */
+class _WalletAction extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final VoidCallback onTap;
+
+  const _WalletAction({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.tonal(
+      onPressed: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 18),
+        child: Column(
+          children: [
+            Icon(icon),
+            const SizedBox(height: 7),
+            Text(title),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// RECEIVE
+// ============================================================
+
+class ReceivePage extends StatelessWidget {
+  final UserSession session;
+
+  const ReceivePage({
+    super.key,
+    required this.session,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final address = session.walletAddress;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Receive ASC'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          if (address == null || address.isEmpty)
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(20),
+                child: Text(
+                  'Your ASC wallet address is not available yet.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            )
+          else ...[
+            const Text(
+              'Scan to receive ASC',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            Center(
+              child: QrImageView(
+                data: address,
+                size: 260,
+                backgroundColor: Colors.white,
+              ),
+            ),
+
+            const SizedBox(height: 25),
+
+            const Text(
+              'ASC Wallet Address',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white60,
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            SelectableText(
+              address,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            OutlinedButton.icon(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Select and copy the wallet address above.',
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy),
+              label: const Text('COPY ADDRESS'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// SEND
+// ============================================================
 
 class SendPage extends StatefulWidget {
-  final ASCSession session;
+  final UserSession session;
 
   const SendPage({
     super.key,
@@ -2460,192 +1977,14 @@ class SendPage extends StatefulWidget {
   });
 
   @override
-  State<SendPage> createState() =>
-      _SendPageState();
+  State<SendPage> createState() => _SendPageState();
 }
 
-class _SendPageState
-    extends State<SendPage> {
-  final addressController =
-      TextEditingController();
+class _SendPageState extends State<SendPage> {
+  final addressController = TextEditingController();
+  final amountController = TextEditingController();
 
-  final amountController =
-      TextEditingController();
-
-  bool sending = false;
-
-  Future<void> scanQr() async {
-    final result =
-        await Navigator.push<
-            String>(
-      context,
-      MaterialPageRoute(
-        builder: (_) =>
-            const ScannerPage(),
-      ),
-    );
-
-    if (result != null &&
-        result.trim().isNotEmpty &&
-        mounted) {
-      setState(() {
-        addressController
-                .text =
-            result.trim();
-      });
-    }
-  }
-
-  Future<void> send() async {
-    final recipient =
-        addressController.text.trim();
-
-    final amount =
-        double.tryParse(
-      amountController.text.trim(),
-    );
-
-    if (recipient.isEmpty) {
-      showMessage(
-        'Recipient address enter karo.',
-      );
-      return;
-    }
-
-    if (amount == null ||
-        amount <= 0) {
-      showMessage(
-        'Valid ASC amount enter karo.',
-      );
-      return;
-    }
-
-    if (amount >
-        widget.session.balance) {
-      showMessage(
-        'Insufficient ASC balance.',
-      );
-      return;
-    }
-
-    final confirmed =
-        await showDialog<bool>(
-      context: context,
-      builder: (_) =>
-          AlertDialog(
-        title:
-            const Text(
-          'CONFIRM SEND',
-        ),
-        content:
-            Text(
-          '${amount.toStringAsFixed(8)} ASC\n\nTo:\n$recipient',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(
-              context,
-              false,
-            ),
-            child:
-                const Text(
-              'CANCEL',
-            ),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(
-              context,
-              true,
-            ),
-            child:
-                const Text(
-              'CONFIRM',
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) {
-      return;
-    }
-
-    setState(
-      () => sending = true,
-    );
-
-    try {
-      final result =
-          await ASCApi.send(
-        recipient,
-        amount,
-      );
-
-      if (!mounted) return;
-
-      final status =
-          result['status']
-              ?.toString() ??
-          'SUBMITTED';
-
-      final hash =
-          result['tx_hash']
-              ?.toString() ??
-          '';
-
-      await showDialog(
-        context: context,
-        builder: (_) =>
-            AlertDialog(
-          title:
-              const Text(
-            'TRANSFER',
-          ),
-          content:
-              Text(
-            'Status: $status\n\n'
-            '${hash.isEmpty ? 'Server is processing the transaction.' : 'TX: $hash'}',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () =>
-                  Navigator.pop(
-                context,
-              ),
-              child:
-                  const Text(
-                'OK',
-              ),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      showMessage(
-        e.toString(),
-      );
-    } finally {
-      if (mounted) {
-        setState(
-          () => sending = false,
-        );
-      }
-    }
-  }
-
-  void showMessage(
-    String text,
-  ) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-      ),
-    );
-  }
+  bool loading = false;
 
   @override
   void dispose() {
@@ -2654,123 +1993,122 @@ class _SendPageState
     super.dispose();
   }
 
+  void message(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  Future<void> send() async {
+    final address = addressController.text.trim();
+    final amount = double.tryParse(
+      amountController.text.trim(),
+    );
+
+    if (address.isEmpty) {
+      message('Enter the recipient wallet address.');
+      return;
+    }
+
+    if (amount == null || amount <= 0) {
+      message('Enter a valid ASC amount.');
+      return;
+    }
+
+    if (amount > widget.session.balance) {
+      message('Insufficient ASC balance.');
+      return;
+    }
+
+    setState(() => loading = true);
+
+    try {
+      final data = await ASApi.sendAsc(
+        widget.session.token,
+        address,
+        amount,
+      );
+
+      if (!mounted) return;
+
+      setState(() => loading = false);
+
+      message(
+        data['message']?.toString() ??
+            'ASC transfer submitted successfully.',
+      );
+    } catch (e) {
+      setState(() => loading = false);
+
+      message(
+        e.toString().replaceFirst('Exception: ', ''),
+      );
+    }
+  }
+
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text(
-          'SEND ASC',
-        ),
+        title: const Text('Send ASC'),
       ),
       body: ListView(
-        padding:
-            const EdgeInsets.all(
-          20,
-        ),
+        padding: const EdgeInsets.all(20),
         children: [
-          Card(
-            child:
-                ListTile(
-              leading:
-                  const Icon(
-                Icons
-                    .account_balance_wallet,
-              ),
-              title:
-                  const Text(
-                'Available Balance',
-              ),
-              subtitle:
-                  Text(
-                '${widget.session.balance.toStringAsFixed(8)} ASC',
-              ),
+          TextField(
+            controller: addressController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Recipient wallet address',
+              border: OutlineInputBorder(),
             ),
           ),
 
-          const SizedBox(
-            height: 15,
-          ),
+          const SizedBox(height: 15),
 
-          TextField(
-            controller:
-                addressController,
-            minLines: 2,
-            maxLines: 4,
-            decoration:
-                InputDecoration(
-              labelText:
-                  'Recipient ASC Address',
-              hintText:
-                  'ASC address',
-              border:
-                  const OutlineInputBorder(),
-              suffixIcon:
-                  IconButton(
-                onPressed:
-                    scanQr,
-                icon:
-                    const Icon(
-                  Icons
-                      .qr_code_scanner,
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScannerPage(
+                    title: 'Scan ASC Address',
+                    onScanned: (value) {
+                      addressController.text = value;
+                      Navigator.pop(context);
+                    },
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
+            icon: const Icon(Icons.qr_code_scanner),
+            label: const Text('SCAN QR'),
           ),
 
-          const SizedBox(
-            height: 15,
-          ),
+          const SizedBox(height: 15),
 
           TextField(
-            controller:
-                amountController,
-            keyboardType:
-                const TextInputType
-                    .numberWithOptions(
+            controller: amountController,
+            keyboardType: const TextInputType.numberWithOptions(
               decimal: true,
             ),
-            decoration:
-                const InputDecoration(
-              labelText:
-                  'Amount ASC',
-              border:
-                  OutlineInputBorder(),
+            decoration: const InputDecoration(
+              labelText: 'ASC amount',
+              border: OutlineInputBorder(),
             ),
           ),
 
-          const SizedBox(
-            height: 20,
-          ),
+          const SizedBox(height: 25),
 
           SizedBox(
-            width:
-                double.infinity,
-            child:
-                FilledButton.icon(
-              onPressed:
-                  sending
-                      ? null
-                      : send,
-              icon:
-                  const Icon(
-                Icons.send,
-              ),
-              label:
-                  Padding(
-                padding:
-                    const EdgeInsets
-                        .all(
-                  14,
-                ),
-                child: Text(
-                  sending
-                      ? 'PROCESSING...'
-                      : 'SEND ASC',
-                ),
-              ),
+            height: 54,
+            child: FilledButton(
+              onPressed: loading ? null : send,
+              child: loading
+                  ? const CircularProgressIndicator()
+                  : const Text('SEND ASC'),
             ),
           ),
         ],
@@ -2779,91 +2117,71 @@ class _SendPageState
   }
 }
 
-/* ============================================================
-   QR SCANNER
-============================================================ */
+// ============================================================
+// QR SCANNER
+// ============================================================
 
-class ScannerPage
-    extends StatefulWidget {
+class ScannerPage extends StatefulWidget {
+  final String title;
+  final ValueChanged<String> onScanned;
+
   const ScannerPage({
     super.key,
+    required this.title,
+    required this.onScanned,
   });
 
   @override
-  State<ScannerPage> createState() =>
-      _ScannerPageState();
+  State<ScannerPage> createState() => _ScannerPageState();
 }
 
-class _ScannerPageState
-    extends State<ScannerPage> {
-  bool found = false;
-
-  void onDetect(
-    BarcodeCapture capture,
-  ) {
-    if (found) return;
-
-    for (final barcode
-        in capture.barcodes) {
-      final value =
-          barcode.rawValue;
-
-      if (value != null &&
-          value.trim().isNotEmpty) {
-        found = true;
-
-        Navigator.pop(
-          context,
-          value.trim(),
-        );
-
-        return;
-      }
-    }
-  }
+class _ScannerPageState extends State<ScannerPage> {
+  bool scanned = false;
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text(
-          'SCAN ASC ADDRESS',
-        ),
+        title: Text(widget.title),
       ),
-      body:
-          MobileScanner(
-        onDetect:
-            onDetect,
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (scanned) return;
+
+          for (final barcode in capture.barcodes) {
+            final value = barcode.rawValue;
+
+            if (value != null && value.isNotEmpty) {
+              scanned = true;
+              widget.onScanned(value);
+              break;
+            }
+          }
+        },
       ),
     );
   }
 }
 
-/* ============================================================
-   HISTORY
-============================================================ */
+// ============================================================
+// HISTORY
+// ============================================================
 
-class HistoryPage
-    extends StatefulWidget {
+class HistoryPage extends StatefulWidget {
+  final UserSession session;
+
   const HistoryPage({
     super.key,
+    required this.session,
   });
 
   @override
-  State<HistoryPage> createState() =>
-      _HistoryPageState();
+  State<HistoryPage> createState() => _HistoryPageState();
 }
 
-class _HistoryPageState
-    extends State<HistoryPage> {
+class _HistoryPageState extends State<HistoryPage> {
   bool loading = true;
-  String? error;
-
-  List<ASCTransaction>
-      transactions = [];
+  List<ASCTx> transactions = [];
 
   @override
   void initState() {
@@ -2872,479 +2190,67 @@ class _HistoryPageState
   }
 
   Future<void> load() async {
-    setState(() {
-      loading = true;
-      error = null;
-    });
-
     try {
-      final result =
-          await ASCApi.transactions();
+      final data = await ASApi.transactions(
+        widget.session.token,
+      );
 
       if (!mounted) return;
 
       setState(() {
-        transactions =
-            result;
+        transactions = data;
         loading = false;
       });
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
-
-      setState(() {
-        error =
-            e.toString();
-        loading = false;
-      });
+      setState(() => loading = false);
     }
-  }
-
-  IconData iconFor(
-    String type,
-  ) {
-    final t =
-        type.toLowerCase();
-
-    if (t.contains('claim') ||
-        t.contains('mining')) {
-      return Icons.bolt;
-    }
-
-    if (t.contains('send')) {
-      return Icons
-          .arrow_upward;
-    }
-
-    if (t.contains('receive')) {
-      return Icons
-          .arrow_downward;
-    }
-
-    if (t.contains('kyc')) {
-      return Icons.verified;
-    }
-
-    return Icons.swap_horiz;
-  }
-
-  Color colorFor(
-    String type,
-  ) {
-    final t =
-        type.toLowerCase();
-
-    if (t.contains('send')) {
-      return Colors.red;
-    }
-
-    if (t.contains('receive') ||
-        t.contains('claim') ||
-        t.contains('mining')) {
-      return Colors.green;
-    }
-
-    return Colors.blue;
   }
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
-    if (loading) {
-      return Scaffold(
-        appBar: AppBar(
-          title:
-              const Text(
-            'ASC HISTORY',
-          ),
-        ),
-        body:
-            const Center(
-          child:
-              CircularProgressIndicator(),
-        ),
-      );
-    }
-
-    if (error != null) {
-      return Scaffold(
-        appBar: AppBar(
-          title:
-              const Text(
-            'ASC HISTORY',
-          ),
-        ),
-        body:
-            Center(
-          child:
-              Padding(
-            padding:
-                const EdgeInsets
-                    .all(
-              24,
-            ),
-            child: Column(
-              mainAxisSize:
-                  MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons
-                      .error_outline,
-                  size: 55,
-                ),
-                const SizedBox(
-                  height: 12,
-                ),
-                Text(
-                  error!,
-                  textAlign:
-                      TextAlign.center,
-                ),
-                const SizedBox(
-                  height: 15,
-                ),
-                FilledButton(
-                  onPressed:
-                      load,
-                  child:
-                      const Text(
-                    'RETRY',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    if (transactions.isEmpty) {
-      return Scaffold(
-        appBar: AppBar(
-          title:
-              const Text(
-            'ASC HISTORY',
-          ),
-          actions: [
-            IconButton(
-              onPressed:
-                  load,
-              icon:
-                  const Icon(
-                Icons.refresh,
-              ),
-            ),
-          ],
-        ),
-        body:
-            const Center(
-          child:
-              Text(
-            'No transactions yet.',
-          ),
-        ),
-      );
-    }
-
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title:
-            const Text(
-          'ASC HISTORY',
-        ),
-        actions: [
-          IconButton(
-            onPressed:
-                load,
-            icon:
-                const Icon(
-              Icons.refresh,
-            ),
-          ),
-        ],
+        title: const Text('Transaction History'),
       ),
-      body:
-          RefreshIndicator(
-        onRefresh: load,
-        child:
-            ListView.separated(
-          padding:
-              const EdgeInsets.all(
-            12,
-          ),
-          itemCount:
-              transactions.length,
-          separatorBuilder:
-              (_, __) =>
-                  const SizedBox(
-            height: 8,
-          ),
-          itemBuilder:
-              (_, index) {
-            final tx =
-                transactions[index];
+      body: loading
+          ? const Center(
+              child: CircularProgressIndicator(),
+            )
+          : transactions.isEmpty
+              ? const Center(
+                  child: Text('No transactions yet.'),
+                )
+              : RefreshIndicator(
+                  onRefresh: load,
+                  child: ListView.builder(
+                    itemCount: transactions.length,
+                    itemBuilder: (_, index) {
+                      final tx = transactions[index];
 
-            final color =
-                colorFor(
-              tx.type,
-            );
-
-            return Card(
-              child:
-                  ListTile(
-                leading:
-                    CircleAvatar(
-                  child:
-                      Icon(
-                    iconFor(
-                      tx.type,
-                    ),
-                    color:
-                        color,
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        child: ListTile(
+                          leading: Icon(
+                            tx.type.toLowerCase() == 'receive'
+                                ? Icons.call_received
+                                : Icons.call_made,
+                          ),
+                          title: Text(
+                            '${tx.amount.toStringAsFixed(2)} ASC',
+                          ),
+                          subtitle: Text(
+                            '${tx.type}\n${tx.status}',
+                          ),
+                          isThreeLine: true,
+                        ),
+                      );
+                    },
                   ),
                 ),
-                title:
-                    Text(
-                  tx.type
-                      .toUpperCase(),
-                  style:
-                      const TextStyle(
-                    fontWeight:
-                        FontWeight
-                            .bold,
-                  ),
-                ),
-                subtitle:
-                    Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    if (tx.sender
-                        .isNotEmpty)
-                      Text(
-                        'From: ${tx.sender}',
-                        maxLines:
-                            1,
-                        overflow:
-                            TextOverflow
-                                .ellipsis,
-                      ),
-                    if (tx.recipient
-                        .isNotEmpty)
-                      Text(
-                        'To: ${tx.recipient}',
-                        maxLines:
-                            1,
-                        overflow:
-                            TextOverflow
-                                .ellipsis,
-                      ),
-                    if (tx.status
-                        .isNotEmpty)
-                      Text(
-                        'Status: ${tx.status}',
-                      ),
-                    if (tx.txHash
-                        .isNotEmpty)
-                      Text(
-                        'TX: ${tx.txHash}',
-                        maxLines:
-                            1,
-                        overflow:
-                            TextOverflow
-                                .ellipsis,
-                      ),
-                    if (tx.date !=
-                        null)
-                      Text(
-                        tx.date!
-                            .toLocal()
-                            .toString(),
-                      ),
-                  ],
-                ),
-                trailing:
-                    Text(
-                  '${tx.amount >= 0 ? '+' : ''}${tx.amount.toStringAsFixed(4)}',
-                  style:
-                      TextStyle(
-                    color:
-                        color,
-                    fontWeight:
-                        FontWeight
-                            .bold,
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-/* ============================================================
-   ACCOUNT
-============================================================ */
-
-class AccountPage
-    extends StatelessWidget {
-  final ASCSession session;
-
-  const AccountPage({
-    super.key,
-    required this.session,
-  });
-
-  Widget info(
-    String title,
-    String value,
-    IconData icon,
-  ) {
-    return Card(
-      child: ListTile(
-        leading:
-            Icon(icon),
-        title:
-            Text(
-          title,
-          style:
-              const TextStyle(
-            fontSize: 12,
-            color:
-                Colors.grey,
-          ),
-        ),
-        subtitle:
-            Text(
-          value,
-          style:
-              const TextStyle(
-            fontSize: 16,
-            fontWeight:
-                FontWeight.w600,
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(
-    BuildContext context,
-  ) {
-    return Scaffold(
-      appBar: AppBar(
-        title:
-            const Text(
-          'ACCOUNT',
-        ),
-      ),
-      body: ListView(
-        padding:
-            const EdgeInsets.all(
-          16,
-        ),
-        children: [
-          const CircleAvatar(
-            radius: 42,
-            child: Icon(
-              Icons.person,
-              size: 45,
-            ),
-          ),
-          const SizedBox(
-            height: 15,
-          ),
-          const Center(
-            child: Text(
-              'AS COIN ACCOUNT',
-              style:
-                  TextStyle(
-                fontSize: 20,
-                fontWeight:
-                    FontWeight.bold,
-              ),
-            ),
-          ),
-          const SizedBox(
-            height: 20,
-          ),
-
-          info(
-            'User ID',
-            session.accountId,
-            Icons.badge,
-          ),
-
-          info(
-            'Phone',
-            session.phone,
-            Icons.phone,
-          ),
-
-          info(
-            'Wallet',
-            session.walletAddress,
-            Icons
-                .account_balance_wallet,
-          ),
-
-          info(
-            'Balance',
-            '${session.balance.toStringAsFixed(8)} ASC',
-            Icons
-                .monetization_on,
-          ),
-
-          info(
-            'KYC',
-            session.kycVerified
-                ? 'VERIFIED'
-                : 'NOT VERIFIED',
-            Icons.verified_user,
-          ),
-
-          info(
-            'Mining Rate',
-            '0.14 ASC / day',
-            Icons.bolt,
-          ),
-
-          info(
-            'Migration',
-            '${ASCConfig.migrationDays} days',
-            Icons.swap_horiz,
-          ),
-
-          info(
-            'Mining End',
-            '${ASCConfig.miningEndYear}',
-            Icons.event,
-          ),
-
-          const SizedBox(
-            height: 15,
-          ),
-
-          const Card(
-            child: Padding(
-              padding:
-                  EdgeInsets.all(16),
-              child: Text(
-                'Account, KYC, mining and wallet rules must be enforced by the AS COIN backend. The app itself is not the authority for balances or rewards.',
-                style:
-                    TextStyle(
-                  color:
-                      Colors.grey,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
